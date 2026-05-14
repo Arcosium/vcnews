@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>VC News — 벤처 뉴스 플랫폼</title>
+    <meta name="description" content="벤처협회공고, 한국투자파트너스 뉴스를 실시간으로 모아보는 VC 뉴스 플랫폼">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="app-header">
+            <div class="header-content">
+                <div class="header-logo">
+                    <span class="logo-icon material-icons-round">trending_up</span>
+                    <h1>VC News</h1>
+                </div>
+                
+                <nav id="top-nav" style="display: flex; flex-direction: row; align-items: center; gap: 10px; overflow-x: auto; white-space: nowrap; margin-left: 20px; flex: 1;">
+                    <button class="nav-item active" data-tab="vc_notices" id="nav-vc" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
+                        <span class="material-icons-round" style="font-size: 18px;">campaign</span>
+                        <span class="nav-label">벤처공고</span>
+                    </button>
+                    <button class="nav-item" data-tab="kip_news" id="nav-kip" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
+                        <span class="material-icons-round" style="font-size: 18px;">newspaper</span>
+                        <span class="nav-label">KIP News</span>
+                    </button>
+                    <button class="nav-item" data-tab="scraps" id="nav-scraps" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
+                        <span class="material-icons-round" style="font-size: 18px;">star</span>
+                        <span class="nav-label">스크랩</span>
+                    </button>
+                    <button class="nav-item" data-tab="settings" id="nav-settings" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
+                        <span class="material-icons-round" style="font-size: 18px;">settings</span>
+                        <span class="nav-label">설정</span>
+                    </button>
+                </nav>
+
+                <button id="btn-refresh" class="header-btn" title="수동 크롤링">
+                    <span class="material-icons-round">refresh</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Search Bar -->
+        <div id="search-bar-container">
+            <div class="search-bar">
+                <span class="material-icons-round search-icon">search</span>
+                <input type="text" id="search-input" placeholder="뉴스 검색..." autocomplete="off">
+                <button id="search-clear" class="search-clear hidden">
+                    <span class="material-icons-round">close</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <main id="main-content">
+            <!-- Articles List -->
+            <div id="articles-container">
+                <div id="articles-list" class="articles-list"></div>
+                <div id="loading-indicator" class="loading hidden">
+                    <div class="loading-spinner"></div>
+                    <span>불러오는 중...</span>
+                </div>
+                <div id="empty-state" class="empty-state hidden">
+                    <span class="material-icons-round empty-icon">article</span>
+                    <p>표시할 뉴스가 없습니다</p>
+                </div>
+            </div>
+
+            <!-- Settings Panel -->
+            <div id="settings-panel" class="settings-panel hidden">
+                <div class="settings-section">
+                    <h2 class="settings-title">
+                        <span class="material-icons-round">schedule</span>
+                        크롤링 주기
+                    </h2>
+                    <div class="setting-row">
+                        <label for="crawl-interval">자동 수집 간격</label>
+                        <select id="crawl-interval" class="setting-select">
+                            <option value="30">30분</option>
+                            <option value="60" selected>1시간</option>
+                            <option value="180">3시간</option>
+                            <option value="360">6시간</option>
+                            <option value="720">12시간</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h2 class="settings-title">
+                        <span class="material-icons-round">notifications</span>
+                        알림 설정
+                    </h2>
+                    <div class="setting-row">
+                        <label for="toggle-notifications">전체 알림</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-notifications" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-row sub-setting" id="notification-sub-settings">
+                        <div class="setting-row">
+                            <label for="toggle-vc">벤처협회공고 알림</label>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle-vc" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="setting-row">
+                            <label for="toggle-kip">KIP News 알림</label>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle-kip" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h2 class="settings-title">
+                        <span class="material-icons-round">label</span>
+                        알림 키워드
+                    </h2>
+                    <p class="settings-desc">등록한 키워드가 포함된 뉴스만 알림을 받습니다. 비어 있으면 모든 신규 뉴스에 알림.</p>
+                    <div class="keyword-input-row">
+                        <input type="text" id="keyword-input" placeholder="키워드 입력" class="keyword-input">
+                        <button id="btn-add-keyword" class="btn-add-keyword">
+                            <span class="material-icons-round">add</span>
+                        </button>
+                    </div>
+                    <div id="keywords-list" class="keywords-list"></div>
+                </div>
+
+                <div class="settings-section">
+                    <button id="btn-save-settings" class="btn-primary">
+                        <span class="material-icons-round">save</span>
+                        설정 저장
+                    </button>
+                </div>
+            </div>
+        </main>
+
+
+        <!-- Toast Notification -->
+        <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

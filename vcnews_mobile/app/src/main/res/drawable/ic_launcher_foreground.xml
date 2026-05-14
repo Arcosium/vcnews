@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background circle -->
+    <path
+        android:fillColor="#6366f1"
+        android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0" />
+    <!-- Trending Up arrow icon -->
+    <path
+        android:fillColor="#ffffff"
+        android:pathData="M40,62l6,-6l4.59,4.58L60.17,51L54,51l0,-4l12,0l0,12l-4,0l0,-6.17L50.59,64.17L46,59.59L42,63.59z" />
+</vector>

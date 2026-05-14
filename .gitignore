@@ -1,0 +1,56 @@
+# 보안
+.env
+.env.*
+*.pem
+*.key
+secrets.*
+Password
+password
+
+# 로그/임시
+*.log
+nohup.out
+*.swp
+*.swo
+
+# DB
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+
+# Android/Gradle
+.gradle/
+local.properties
+*.apk
+*.aab
+
+# 대용량
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.gguf
+*.bin
+*_30k.json
+quant_dataset*.json
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
