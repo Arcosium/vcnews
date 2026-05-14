@@ -1,12 +1,15 @@
 package uk.ai_ve.vcnews
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
@@ -20,7 +23,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -34,7 +39,15 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val WEB_URL = "https://vcnews.ai-ve.uk"
         private const val KEY_URL = "current_url"
+
+        /** 알림 탭 시 WebView로 곧장 로드할 기사 URL (Intent extra key). */
+        const val EXTRA_TARGET_URL = "vcnews.target_url"
     }
+
+    // POST_NOTIFICATIONS 런타임 권한 결과 — 거부 시 그냥 무시 (사용자가 설정에서 다시 허용 가능).
+    private val notifPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* granted -> Unit; 거부되면 알림은 표시되지 않을 뿐 앱은 정상 동작 */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Splash screen (Material 3 스타일)
@@ -54,12 +67,37 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         setupRetryButton()
 
-        // 저장된 URL 복원 또는 초기 URL 로드
-        val urlToLoad = savedInstanceState?.getString(KEY_URL) ?: WEB_URL
+        // 알림 권한 (API 33+) 및 백그라운드 폴링 워커 등록
+        requestNotificationPermissionIfNeeded()
+        NewsCheckWorker.schedule(applicationContext)
+
+        // 알림 탭으로 시작된 경우 해당 URL, 아니면 저장된 URL, 아니면 기본 URL
+        val urlToLoad = intent?.getStringExtra(EXTRA_TARGET_URL)
+            ?: savedInstanceState?.getString(KEY_URL)
+            ?: WEB_URL
         if (isNetworkAvailable()) {
             loadUrl(urlToLoad)
         } else {
             showErrorState()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        // singleTask 모드라 이미 살아 있을 때 알림을 누르면 onNewIntent로 들어옴.
+        val target = intent?.getStringExtra(EXTRA_TARGET_URL)
+        if (!target.isNullOrEmpty() && isNetworkAvailable()) {
+            loadUrl(target)
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -130,23 +168,8 @@ class MainActivity : AppCompatActivity() {
     // ─── SwipeRefresh 설정 ──────────────────────────────────
 
     private fun setupSwipeRefresh() {
-        binding.swipeRefresh.apply {
-            setColorSchemeColors(
-                Color.parseColor("#6366f1"),
-                Color.parseColor("#8b5cf6"),
-                Color.parseColor("#a78bfa")
-            )
-            setProgressBackgroundColorSchemeColor(Color.parseColor("#1a2035"))
-
-            setOnRefreshListener {
-                if (isNetworkAvailable()) {
-                    binding.webView.reload()
-                } else {
-                    isRefreshing = false
-                    showErrorState()
-                }
-            }
-        }
+        // Pull-to-refresh 비활성화 — 헤더의 새로고침 버튼만 사용.
+        binding.swipeRefresh.isEnabled = false
     }
 
     // ─── 뒤로가기 핸들링 ────────────────────────────────────

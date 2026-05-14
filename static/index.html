@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
     <div id="app">
@@ -20,25 +20,6 @@
                     <span class="logo-icon material-icons-round">trending_up</span>
                     <h1>VC News</h1>
                 </div>
-                
-                <nav id="top-nav" style="display: flex; flex-direction: row; align-items: center; gap: 10px; overflow-x: auto; white-space: nowrap; margin-left: 20px; flex: 1;">
-                    <button class="nav-item active" data-tab="vc_notices" id="nav-vc" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
-                        <span class="material-icons-round" style="font-size: 18px;">campaign</span>
-                        <span class="nav-label">벤처공고</span>
-                    </button>
-                    <button class="nav-item" data-tab="kip_news" id="nav-kip" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
-                        <span class="material-icons-round" style="font-size: 18px;">newspaper</span>
-                        <span class="nav-label">KIP News</span>
-                    </button>
-                    <button class="nav-item" data-tab="scraps" id="nav-scraps" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
-                        <span class="material-icons-round" style="font-size: 18px;">star</span>
-                        <span class="nav-label">스크랩</span>
-                    </button>
-                    <button class="nav-item" data-tab="settings" id="nav-settings" style="display: inline-flex; flex-direction: row; align-items: center; gap: 6px;">
-                        <span class="material-icons-round" style="font-size: 18px;">settings</span>
-                        <span class="nav-label">설정</span>
-                    </button>
-                </nav>
 
                 <button id="btn-refresh" class="header-btn" title="수동 크롤링">
                     <span class="material-icons-round">refresh</span>
@@ -123,17 +104,32 @@
 
                 <div class="settings-section">
                     <h2 class="settings-title">
-                        <span class="material-icons-round">label</span>
-                        알림 키워드
+                        <span class="material-icons-round">campaign</span>
+                        벤처공고 알림 키워드
                     </h2>
-                    <p class="settings-desc">등록한 키워드가 포함된 뉴스만 알림을 받습니다. 비어 있으면 모든 신규 뉴스에 알림.</p>
+                    <p class="settings-desc">등록한 키워드가 포함된 벤처공고만 알림을 받습니다. 비어 있으면 모든 신규 벤처공고에 알림.</p>
                     <div class="keyword-input-row">
-                        <input type="text" id="keyword-input" placeholder="키워드 입력" class="keyword-input">
-                        <button id="btn-add-keyword" class="btn-add-keyword">
+                        <input type="text" id="keyword-input-vc" placeholder="키워드 입력" class="keyword-input" data-source="vc_notices">
+                        <button id="btn-add-keyword-vc" class="btn-add-keyword" data-source="vc_notices">
                             <span class="material-icons-round">add</span>
                         </button>
                     </div>
-                    <div id="keywords-list" class="keywords-list"></div>
+                    <div id="keywords-list-vc" class="keywords-list"></div>
+                </div>
+
+                <div class="settings-section">
+                    <h2 class="settings-title">
+                        <span class="material-icons-round">newspaper</span>
+                        KIP News 알림 키워드
+                    </h2>
+                    <p class="settings-desc">등록한 키워드가 포함된 KIP News만 알림을 받습니다. 비어 있으면 모든 신규 KIP News에 알림.</p>
+                    <div class="keyword-input-row">
+                        <input type="text" id="keyword-input-kip" placeholder="키워드 입력" class="keyword-input" data-source="kip_news">
+                        <button id="btn-add-keyword-kip" class="btn-add-keyword" data-source="kip_news">
+                            <span class="material-icons-round">add</span>
+                        </button>
+                    </div>
+                    <div id="keywords-list-kip" class="keywords-list"></div>
                 </div>
 
                 <div class="settings-section">
@@ -145,11 +141,30 @@
             </div>
         </main>
 
+        <!-- Bottom Navigation -->
+        <nav id="bottom-nav">
+            <button class="nav-item active" data-tab="vc_notices" id="nav-vc">
+                <span class="material-icons-round nav-icon">campaign</span>
+                <span class="nav-label">벤처공고</span>
+            </button>
+            <button class="nav-item" data-tab="kip_news" id="nav-kip">
+                <span class="material-icons-round nav-icon">newspaper</span>
+                <span class="nav-label">KIP News</span>
+            </button>
+            <button class="nav-item" data-tab="scraps" id="nav-scraps">
+                <span class="material-icons-round nav-icon">star</span>
+                <span class="nav-label">스크랩</span>
+            </button>
+            <button class="nav-item" data-tab="settings" id="nav-settings">
+                <span class="material-icons-round nav-icon">settings</span>
+                <span class="nav-label">설정</span>
+            </button>
+        </nav>
 
         <!-- Toast Notification -->
         <div id="toast" class="toast hidden"></div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=4"></script>
 </body>
 </html>

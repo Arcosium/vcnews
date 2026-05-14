@@ -18,6 +18,9 @@
         settings: null,
         isLoading: false,
         searchDebounce: null,
+        // 진행 중인 fetch 취소용 — 탭 전환 시 이전 요청을 즉시 중단해서
+        // 응답 순서 뒤바뀜과 'database is locked' 류 일시 오류를 막는다.
+        currentAbort: null,
     };
 
     // ─── DOM References ──────────────────────────────────
@@ -41,9 +44,12 @@
         toggleVc: $('#toggle-vc'),
         toggleKip: $('#toggle-kip'),
         notificationSubSettings: $('#notification-sub-settings'),
-        keywordInput: $('#keyword-input'),
-        btnAddKeyword: $('#btn-add-keyword'),
-        keywordsList: $('#keywords-list'),
+        keywordInputVc: $('#keyword-input-vc'),
+        keywordInputKip: $('#keyword-input-kip'),
+        btnAddKeywordVc: $('#btn-add-keyword-vc'),
+        btnAddKeywordKip: $('#btn-add-keyword-kip'),
+        keywordsListVc: $('#keywords-list-vc'),
+        keywordsListKip: $('#keywords-list-kip'),
         btnSaveSettings: $('#btn-save-settings'),
         searchBarContainer: $('#search-bar-container'),
     };
@@ -51,16 +57,16 @@
     // ─── API ─────────────────────────────────────────────
 
     const API = {
-        async getArticles(tab, search = '', page = 1, size = 50) {
+        async getArticles(tab, search = '', page = 1, size = 50, signal) {
             const params = new URLSearchParams({ tab, search, page, size });
-            const res = await fetch(`/api/articles?${params}`);
+            const res = await fetch(`/api/articles?${params}`, { signal });
             if (!res.ok) throw new Error('Failed to fetch articles');
             return res.json();
         },
 
-        async getScraps(search = '', page = 1, size = 50) {
+        async getScraps(search = '', page = 1, size = 50, signal) {
             const params = new URLSearchParams({ search, page, size });
-            const res = await fetch(`/api/scraps?${params}`);
+            const res = await fetch(`/api/scraps?${params}`, { signal });
             if (!res.ok) throw new Error('Failed to fetch scraps');
             return res.json();
         },
@@ -87,11 +93,11 @@
             return res.json();
         },
 
-        async addKeyword(keyword) {
+        async addKeyword(keyword, source) {
             const res = await fetch('/api/keywords', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keyword }),
+                body: JSON.stringify({ keyword, source }),
             });
             if (!res.ok) {
                 const err = await res.json();
@@ -100,10 +106,11 @@
             return res.json();
         },
 
-        async deleteKeyword(keyword) {
-            const res = await fetch(`/api/keywords/${encodeURIComponent(keyword)}`, {
-                method: 'DELETE',
-            });
+        async deleteKeyword(keyword, source) {
+            const res = await fetch(
+                `/api/keywords/${encodeURIComponent(source)}/${encodeURIComponent(keyword)}`,
+                { method: 'DELETE' }
+            );
             if (!res.ok) throw new Error('Failed to delete keyword');
             return res.json();
         },
@@ -253,31 +260,59 @@
     // ─── Load Data ───────────────────────────────────────
 
     async function loadArticles() {
-        if (state.isLoading) return;
+        // 이전 요청을 즉시 취소 — 탭을 빠르게 전환할 때 오래된 응답이
+        // 새 탭에 덮어쓰는 것과 'AbortError' 외 다른 네트워크 에러로 둔갑하는 것을 막는다.
+        if (state.currentAbort) {
+            state.currentAbort.abort();
+        }
+        const controller = new AbortController();
+        state.currentAbort = controller;
+
+        // 탭 식별자를 캡쳐 — 응답이 돌아왔을 때 사용자가 이미 다른 탭으로
+        // 옮겼다면 무시한다.
+        const requestedTab = state.currentTab;
+
         showLoading();
+        state.isLoading = true;
 
         try {
             let data;
-            if (state.currentTab === 'scraps') {
-                data = await API.getScraps(state.searchQuery, state.currentPage, state.pageSize);
+            if (requestedTab === 'scraps') {
+                data = await API.getScraps(
+                    state.searchQuery, state.currentPage, state.pageSize, controller.signal
+                );
             } else {
                 data = await API.getArticles(
-                    state.currentTab,
+                    requestedTab,
                     state.searchQuery,
                     state.currentPage,
-                    state.pageSize
+                    state.pageSize,
+                    controller.signal
                 );
+            }
+
+            // 응답이 도착했을 때 현재 탭이 바뀌었거나 요청이 취소된 상태라면 버린다.
+            if (controller.signal.aborted || state.currentTab !== requestedTab) {
+                return;
             }
 
             state.articles = data.articles;
             state.totalArticles = data.total;
             renderArticles(state.articles);
         } catch (err) {
+            // 의도적 취소는 사용자에게 보일 오류가 아님
+            if (err.name === 'AbortError') return;
             showToast('데이터 로드 실패', 'error');
             console.error(err);
-            showEmptyState();
+            if (state.currentTab === requestedTab) {
+                showEmptyState();
+            }
         } finally {
-            hideLoading();
+            if (state.currentAbort === controller) {
+                state.currentAbort = null;
+                state.isLoading = false;
+                hideLoading();
+            }
         }
     }
 
@@ -291,11 +326,12 @@
             dom.toggleVc.checked = settings.notify_vc_notices;
             dom.toggleKip.checked = settings.notify_kip_news;
 
-            // Sub-settings visibility
             updateNotificationSubSettings();
 
-            // Render keywords
-            renderKeywords(settings.keywords);
+            // 소스별 키워드 렌더 — 서버는 항상 두 키를 보장.
+            const kw = settings.keywords || {};
+            renderKeywords('vc_notices', dom.keywordsListVc, kw.vc_notices || []);
+            renderKeywords('kip_news', dom.keywordsListKip, kw.kip_news || []);
         } catch (err) {
             showToast('설정 로드 실패', 'error');
             console.error(err);
@@ -308,21 +344,27 @@
         dom.notificationSubSettings.style.pointerEvents = enabled ? 'auto' : 'none';
     }
 
-    function renderKeywords(keywords) {
-        dom.keywordsList.innerHTML = '';
+    function renderKeywords(source, listEl, keywords) {
+        listEl.replaceChildren();
         keywords.forEach((kw) => {
             const chip = document.createElement('div');
             chip.className = 'keyword-chip';
-            chip.innerHTML = `
-                <span>${escapeHtml(kw)}</span>
-                <button class="btn-remove" data-keyword="${escapeHtml(kw)}" title="삭제">
-                    <span class="material-icons-round" style="font-size:14px">close</span>
-                </button>
-            `;
 
-            chip.querySelector('.btn-remove').addEventListener('click', async () => {
+            const label = document.createElement('span');
+            label.textContent = kw;
+
+            const btn = document.createElement('button');
+            btn.className = 'btn-remove';
+            btn.title = '삭제';
+            const icon = document.createElement('span');
+            icon.className = 'material-icons-round';
+            icon.style.fontSize = '14px';
+            icon.textContent = 'close';
+            btn.appendChild(icon);
+
+            btn.addEventListener('click', async () => {
                 try {
-                    await API.deleteKeyword(kw);
+                    await API.deleteKeyword(kw, source);
                     chip.style.transition = 'all 0.2s ease';
                     chip.style.opacity = '0';
                     chip.style.transform = 'scale(0.8)';
@@ -333,7 +375,9 @@
                 }
             });
 
-            dom.keywordsList.appendChild(chip);
+            chip.appendChild(label);
+            chip.appendChild(btn);
+            listEl.appendChild(chip);
         });
     }
 
@@ -389,26 +433,32 @@
         // Settings — notification master toggle
         dom.toggleNotifications.addEventListener('change', updateNotificationSubSettings);
 
-        // Settings — add keyword
-        const addKeyword = async () => {
-            const kw = dom.keywordInput.value.trim();
+        // Settings — add keyword (소스별)
+        const addKeywordFor = async (source, inputEl, listEl) => {
+            const kw = inputEl.value.trim();
             if (!kw) return;
-
             try {
-                await API.addKeyword(kw);
-                dom.keywordInput.value = '';
+                await API.addKeyword(kw, source);
+                inputEl.value = '';
                 showToast(`키워드 '${kw}' 추가됨`, 'success');
-                // Re-render keywords
+                // 해당 소스만 재렌더 — 다른 소스는 건드릴 필요 없음
                 const settings = await API.getSettings();
-                renderKeywords(settings.keywords);
+                const kwMap = settings.keywords || {};
+                renderKeywords(source, listEl, kwMap[source] || []);
             } catch (err) {
                 showToast(err.message || '키워드 추가 실패', 'error');
             }
         };
 
-        dom.btnAddKeyword.addEventListener('click', addKeyword);
-        dom.keywordInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') addKeyword();
+        dom.btnAddKeywordVc.addEventListener('click',
+            () => addKeywordFor('vc_notices', dom.keywordInputVc, dom.keywordsListVc));
+        dom.keywordInputVc.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') addKeywordFor('vc_notices', dom.keywordInputVc, dom.keywordsListVc);
+        });
+        dom.btnAddKeywordKip.addEventListener('click',
+            () => addKeywordFor('kip_news', dom.keywordInputKip, dom.keywordsListKip));
+        dom.keywordInputKip.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') addKeywordFor('kip_news', dom.keywordInputKip, dom.keywordsListKip);
         });
 
         // Settings — save
@@ -426,26 +476,7 @@
             }
         });
 
-        // Pull to refresh (simple version)
-        let touchStartY = 0;
-        let isPulling = false;
-
-        dom.articlesContainer.addEventListener('touchstart', (e) => {
-            if (dom.articlesList.scrollTop === 0) {
-                touchStartY = e.touches[0].clientY;
-                isPulling = true;
-            }
-        }, { passive: true });
-
-        dom.articlesContainer.addEventListener('touchend', (e) => {
-            if (!isPulling) return;
-            isPulling = false;
-            const diff = e.changedTouches[0].clientY - touchStartY;
-            if (diff > 80 && state.currentTab !== 'settings') {
-                loadArticles();
-                showToast('새로고침 중...', '');
-            }
-        }, { passive: true });
+        // Pull-to-refresh 제거됨 — 헤더의 새로고침 버튼만 사용.
 
         // Infinite scroll
         const mainContent = $('#main-content');
@@ -466,18 +497,28 @@
         if (state.isLoading) return;
         state.isLoading = true;
 
+        const controller = new AbortController();
+        const previousAbort = state.currentAbort;
+        state.currentAbort = controller;
+        const requestedTab = state.currentTab;
+
         try {
             let data;
-            if (state.currentTab === 'scraps') {
-                data = await API.getScraps(state.searchQuery, state.currentPage, state.pageSize);
+            if (requestedTab === 'scraps') {
+                data = await API.getScraps(
+                    state.searchQuery, state.currentPage, state.pageSize, controller.signal
+                );
             } else {
                 data = await API.getArticles(
-                    state.currentTab,
+                    requestedTab,
                     state.searchQuery,
                     state.currentPage,
-                    state.pageSize
+                    state.pageSize,
+                    controller.signal
                 );
             }
+
+            if (controller.signal.aborted || state.currentTab !== requestedTab) return;
 
             if (data.articles.length > 0) {
                 state.articles.push(...data.articles);
@@ -488,8 +529,11 @@
                 dom.articlesList.appendChild(fragment);
             }
         } catch (err) {
-            console.error(err);
+            if (err.name !== 'AbortError') console.error(err);
         } finally {
+            if (state.currentAbort === controller) {
+                state.currentAbort = previousAbort;
+            }
             state.isLoading = false;
         }
     }

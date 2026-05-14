@@ -83,6 +83,9 @@ body {
     width: 100%;
     position: relative;
     overflow: hidden;
+    /* 상태 표시줄 영역 — viewport-fit=cover 하에서 상단/하단 노치 회피 */
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* ─── Header ───────────────────────────────────────────── */
@@ -738,68 +741,82 @@ body {
     transform: translateY(0);
 }
 
-/* ─── Top Navigation ───────────────────────────────────── */
+/* ─── Bottom Navigation ────────────────────────────────── */
 
-#top-nav {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-left: 24px;
-    flex: 1;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-}
-
-#top-nav::-webkit-scrollbar {
-    display: none;
+#bottom-nav {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    align-items: stretch;
+    height: var(--nav-height);
+    min-height: var(--nav-height);
+    background: var(--bg-glass);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-top: 1px solid var(--border);
+    z-index: 100;
 }
 
 .nav-item {
-    display: inline-flex;
+    position: relative;
+    display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 6px;
-    padding: 8px 16px;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px 4px;
     border: none;
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;
-    transition: all var(--transition-normal);
-    border-radius: var(--radius-full);
-    white-space: nowrap;
+    transition: color var(--transition-normal), background var(--transition-normal);
+    font-family: inherit;
+    min-width: 0;
 }
 
-.nav-item .material-icons-round {
-    font-size: 18px;
-    transition: all var(--transition-normal);
+.nav-item .nav-icon {
+    font-size: 22px;
+    transition: transform var(--transition-normal);
 }
 
 .nav-label {
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.2px;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
 }
 
 .nav-item:hover {
     color: var(--text-secondary);
-    background: rgba(255, 255, 255, 0.05);
 }
 
 .nav-item.active {
-    background: var(--accent-glow);
     color: var(--accent-light);
-    border: 1px solid var(--border);
 }
 
-.nav-item.active .material-icons-round {
-    transform: scale(1.1);
+.nav-item.active .nav-icon {
+    transform: scale(1.15);
+}
+
+.nav-item.active::after {
+    /* 활성 탭 상단 인디케이터 */
+    content: '';
+    position: absolute;
+    top: 0;
+    height: 3px;
+    width: 32px;
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    background: var(--accent-gradient);
 }
 
 /* ─── Toast ────────────────────────────────────────────── */
 
 .toast {
     position: fixed;
-    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(var(--nav-height) + 16px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translateX(-50%) translateY(20px);
     padding: 12px 24px;

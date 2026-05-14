@@ -22,14 +22,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, or_, and_, func
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .models import (
     SessionLocal, init_db, Article, Scrap, Settings, NotificationKeyword,
+    NOTIFICATION_SOURCES,
 )
 from .news_crawler import run_news_crawl
+
+RETENTION_DAYS = 30
 
 import os
 
@@ -53,6 +56,38 @@ def _scheduled_crawl():
         logger.info(f"크롤링 완료:\n{result}")
     except Exception as e:
         logger.error(f"크롤링 오류: {e}")
+
+
+def cleanup_old_articles(days: int = RETENTION_DAYS) -> int:
+    """`days`일보다 오래된 기사를 삭제. 단, 스크랩된 기사는 보존.
+
+    Article.date는 'YYYY-MM-DD' 문자열이므로 사전식 비교가 ISO-8601에서 안전.
+    반환값은 실제로 삭제된 행 수.
+    """
+    cutoff = (datetime.datetime.now(KST) - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    session = SessionLocal()
+    try:
+        scrapped_subq = session.query(Scrap.article_id).subquery()
+        deleted = (
+            session.query(Article)
+            .filter(Article.date < cutoff)
+            .filter(~Article.id.in_(scrapped_subq.select()))
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+        logger.info(f"🧹 오래된 기사 {deleted}건 삭제 (cutoff={cutoff})")
+        return deleted
+    except Exception as e:
+        session.rollback()
+        logger.error(f"기사 정리 오류: {e}")
+        return 0
+    finally:
+        session.close()
+
+
+def _scheduled_cleanup():
+    """일일 정리 작업."""
+    cleanup_old_articles()
 
 
 def _update_scheduler_interval():
@@ -96,10 +131,27 @@ async def lifespan(app: FastAPI):
             
     threading.Thread(target=background_crawl, daemon=True).start()
 
+    # 시작 즉시 1회 정리 (오래된 기사 삭제)
+    try:
+        cleanup_old_articles()
+    except Exception as e:
+        logger.error(f"시작 시 정리 오류: {e}")
+
     # 스케줄러 설정
     _update_scheduler_interval()
+
+    # 매일 03:30 KST에 오래된 기사 정리
+    scheduler.add_job(
+        _scheduled_cleanup,
+        "cron",
+        hour=3,
+        minute=30,
+        id="cleanup_job",
+        replace_existing=True,
+    )
+
     scheduler.start()
-    
+
     yield
     scheduler.shutdown()
 
@@ -141,7 +193,8 @@ class SettingsResponse(BaseModel):
     notifications_enabled: bool
     notify_vc_notices: bool
     notify_kip_news: bool
-    keywords: list[str]
+    # 소스별 키워드 — {"vc_notices": [...], "kip_news": [...]}
+    keywords: dict[str, list[str]]
 
     class Config:
         from_attributes = True
@@ -149,6 +202,7 @@ class SettingsResponse(BaseModel):
 
 class KeywordRequest(BaseModel):
     keyword: str
+    source: str  # 'vc_notices' | 'kip_news'
 
 
 # ─── API 엔드포인트 ────────────────────────────────────────
@@ -206,6 +260,89 @@ def get_articles(
             })
 
         return {"total": total, "page": page, "size": size, "articles": result}
+    finally:
+        session.close()
+
+
+# 신규 기사 (모바일 알림 폴링용)
+@app.get("/api/articles/new")
+def get_new_articles(
+    since_id: int = Query(0, ge=0, description="이 ID보다 큰 기사만 반환 (0이면 베이스라인 동기화)"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """알림 설정과 키워드 필터를 서버에서 적용해 신규 기사만 반환.
+
+    응답 형식:
+      {
+        "articles": [...],   # 최신순 (id DESC)
+        "latest_id": int,    # DB 내 최신 article id — 클라이언트 베이스라인용
+      }
+
+    사용 패턴 (Android WorkManager):
+      1) 최초 실행: since_id=0 호출 → 응답의 latest_id를 저장만 하고 알림 표시 안함
+      2) 이후 실행: since_id=<저장된 마지막 id> 호출 → articles를 알림으로 표시
+    """
+    session = SessionLocal()
+    try:
+        latest_id = session.query(func.max(Article.id)).scalar() or 0
+
+        settings = session.query(Settings).first()
+        if not settings or not settings.notifications_enabled:
+            return {"articles": [], "latest_id": latest_id}
+
+        # 소스별 키워드 로딩 — 비어있으면 해당 소스는 키워드 필터 없이 전건 알림.
+        vc_keywords: list[str] = []
+        kip_keywords: list[str] = []
+        for kw in session.query(NotificationKeyword).all():
+            if kw.source == "vc_notices":
+                vc_keywords.append(kw.keyword)
+            elif kw.source == "kip_news":
+                kip_keywords.append(kw.keyword)
+
+        # 활성 소스(토글) × 소스별 키워드 필터를 결합
+        clauses = []
+        if settings.notify_vc_notices:
+            vc_clause = Article.source.in_(["kvca", "kvic"])
+            if vc_keywords:
+                vc_clause = and_(
+                    vc_clause,
+                    or_(*[Article.title.contains(k) for k in vc_keywords]),
+                )
+            clauses.append(vc_clause)
+        if settings.notify_kip_news:
+            kip_clause = Article.source == "kip"
+            if kip_keywords:
+                kip_clause = and_(
+                    kip_clause,
+                    or_(*[Article.title.contains(k) for k in kip_keywords]),
+                )
+            clauses.append(kip_clause)
+
+        if not clauses:
+            return {"articles": [], "latest_id": latest_id}
+
+        q = (
+            session.query(Article)
+            .filter(Article.id > since_id)
+            .filter(or_(*clauses))
+        )
+
+        articles = q.order_by(desc(Article.id)).limit(limit).all()
+
+        return {
+            "latest_id": latest_id,
+            "articles": [
+                {
+                    "id": a.id,
+                    "source": a.source,
+                    "source_label": a.source_label,
+                    "date": a.date,
+                    "title": a.title,
+                    "link": a.link,
+                }
+                for a in articles
+            ],
+        }
     finally:
         session.close()
 
@@ -280,7 +417,10 @@ def get_settings():
     session = SessionLocal()
     try:
         settings = session.query(Settings).first()
-        keywords = [kw.keyword for kw in session.query(NotificationKeyword).all()]
+        keywords: dict[str, list[str]] = {src: [] for src in NOTIFICATION_SOURCES}
+        for kw in session.query(NotificationKeyword).order_by(NotificationKeyword.id).all():
+            if kw.source in keywords:
+                keywords[kw.source].append(kw.keyword)
         return {
             "crawl_interval_minutes": settings.crawl_interval_minutes,
             "notifications_enabled": settings.notifications_enabled,
@@ -317,39 +457,45 @@ def update_settings(data: SettingsUpdate):
         session.close()
 
 
-# 키워드 추가
+# 키워드 추가 (소스별)
 @app.post("/api/keywords")
 def add_keyword(data: KeywordRequest):
+    if data.source not in NOTIFICATION_SOURCES:
+        raise HTTPException(400, f"유효하지 않은 source: {data.source}")
     session = SessionLocal()
     try:
         kw = data.keyword.strip()
         if not kw:
             raise HTTPException(400, "키워드를 입력하세요")
         existing = session.query(NotificationKeyword).filter(
-            NotificationKeyword.keyword == kw
+            NotificationKeyword.keyword == kw,
+            NotificationKeyword.source == data.source,
         ).first()
         if existing:
             raise HTTPException(409, "이미 등록된 키워드입니다")
-        session.add(NotificationKeyword(keyword=kw))
+        session.add(NotificationKeyword(keyword=kw, source=data.source))
         session.commit()
-        return {"message": f"키워드 '{kw}' 추가 완료"}
+        return {"message": f"키워드 '{kw}' 추가 완료", "source": data.source}
     finally:
         session.close()
 
 
-# 키워드 삭제
-@app.delete("/api/keywords/{keyword}")
-def delete_keyword(keyword: str):
+# 키워드 삭제 (소스별)
+@app.delete("/api/keywords/{source}/{keyword}")
+def delete_keyword(source: str, keyword: str):
+    if source not in NOTIFICATION_SOURCES:
+        raise HTTPException(400, f"유효하지 않은 source: {source}")
     session = SessionLocal()
     try:
         kw = session.query(NotificationKeyword).filter(
-            NotificationKeyword.keyword == keyword
+            NotificationKeyword.keyword == keyword,
+            NotificationKeyword.source == source,
         ).first()
         if not kw:
             raise HTTPException(404, "키워드를 찾을 수 없습니다")
         session.delete(kw)
         session.commit()
-        return {"message": f"키워드 '{keyword}' 삭제 완료"}
+        return {"message": f"키워드 '{keyword}' 삭제 완료", "source": source}
     finally:
         session.close()
 
