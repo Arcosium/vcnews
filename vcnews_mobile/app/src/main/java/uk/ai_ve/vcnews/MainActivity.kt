@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.Toast
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -36,9 +37,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var isPageLoaded = false
 
+    // 두 번 누르면 종료 — 마지막 백 키 시각 (홈 화면에서만 동작).
+    private var lastBackPressTime: Long = 0L
+    private var backPressToast: Toast? = null
+
     companion object {
         private const val WEB_URL = "https://vcnews.ai-ve.uk"
         private const val KEY_URL = "current_url"
+        private const val BACK_EXIT_WINDOW_MS = 2000L
 
         /** 알림 탭 시 WebView로 곧장 로드할 기사 URL (Intent extra key). */
         const val EXTRA_TARGET_URL = "vcnews.target_url"
@@ -179,10 +185,22 @@ class MainActivity : AppCompatActivity() {
             override fun handleOnBackPressed() {
                 if (binding.webView.canGoBack()) {
                     binding.webView.goBack()
-                } else {
-                    // 앱 종료 대신 홈으로 이동
-                    moveTaskToBack(true)
+                    return
                 }
+                // WebView 최상위 — 2초 내 두 번째 백 키 → 종료
+                val now = System.currentTimeMillis()
+                if (now - lastBackPressTime <= BACK_EXIT_WINDOW_MS) {
+                    backPressToast?.cancel()
+                    finish()
+                    return
+                }
+                lastBackPressTime = now
+                backPressToast?.cancel()
+                backPressToast = Toast.makeText(
+                    this@MainActivity,
+                    "한 번 더 누르면 종료됩니다",
+                    Toast.LENGTH_SHORT,
+                ).also { it.show() }
             }
         })
     }

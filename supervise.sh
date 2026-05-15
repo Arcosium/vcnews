@@ -13,7 +13,7 @@ start_server() {
     nohup uvicorn "$APP_MODULE" --host 0.0.0.0 --port $PORT >> "$APP_LOG" 2>&1 & )
 }
 
-server_up() { curl -fsS -m4 "http://localhost:$PORT/api/settings" >/dev/null 2>&1; }
+server_up() { curl -fsS -m4 "http://localhost:$PORT/api/health" >/dev/null 2>&1; }
 
 while true; do
   server_up || { echo "$(date -u +%FT%TZ) [supervise] server DOWN → restart"; start_server; sleep 5; }

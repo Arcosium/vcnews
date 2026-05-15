@@ -1,34 +1,39 @@
-"""VC News Platform — FastAPI 웹앱 서버.
+"""VC News Platform — FastAPI 웹앱 서버 (다중 사용자).
 
 기능:
-  - RESTful API: 기사 목록 조회, 스크랩 관리, 설정 관리
-  - 백그라운드 크롤링 스케줄러 (APScheduler)
-  - 프론트엔드 정적 파일 서빙
-
-사용법:
-  uvicorn app:app --host 0.0.0.0 --port 8585 --reload
+  - 인증: /api/auth/signup, /api/auth/login, /api/auth/logout, /api/auth/me
+  - 기사: /api/articles (공용), /api/articles/new (유저별 알림 필터)
+  - 유저별: 스크랩, 알림 키워드, 알림 토글
+  - 서버 전역: 크롤링 주기 (admin 만 변경)
+  - 백그라운드 크롤링 (APScheduler)
 """
 
 from __future__ import annotations
 
 import datetime
-import threading
 import logging
+import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import desc, or_, and_, func
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, desc, func, or_
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from .auth import (
+    JWT_COOKIE_NAME, JWT_EXPIRE_DAYS,
+    get_current_user, get_optional_user, hash_password, issue_token,
+    verify_password,
+)
 from .models import (
-    SessionLocal, init_db, Article, Scrap, Settings, NotificationKeyword,
-    NOTIFICATION_SOURCES,
+    NOTIFICATION_SOURCES, Article, NotificationKeyword, Scrap,
+    SessionLocal, Settings, User, UserPreferences,
+    ensure_admin_user, init_db,
 )
 from .news_crawler import run_news_crawl
 
@@ -40,6 +45,11 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(_THIS_DIR, "static")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
+# 키워드 — 한국투자파트너스 라는 문자열로 알림 키워드를 등록하면
+# nate_query 가 같은 기사도 알림 매칭에 포함 (제목 검색만이 아니라).
+# 다른 키워드는 해당 시그널이 없음. UI/스키마에는 노출 X.
+_KIP_QUERY_HIDDEN_KEYWORD = "한국투자파트너스"
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vcnews")
 
@@ -49,7 +59,6 @@ scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
 
 def _scheduled_crawl():
-    """백그라운드 크롤링 작업."""
     logger.info("⏰ 스케줄된 크롤링 시작")
     try:
         result = run_news_crawl()
@@ -59,15 +68,11 @@ def _scheduled_crawl():
 
 
 def cleanup_old_articles(days: int = RETENTION_DAYS) -> int:
-    """`days`일보다 오래된 기사를 삭제. 단, 스크랩된 기사는 보존.
-
-    Article.date는 'YYYY-MM-DD' 문자열이므로 사전식 비교가 ISO-8601에서 안전.
-    반환값은 실제로 삭제된 행 수.
-    """
+    """오래된 기사 정리 — 스크랩된 기사는 보존."""
     cutoff = (datetime.datetime.now(KST) - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     session = SessionLocal()
     try:
-        scrapped_subq = session.query(Scrap.article_id).subquery()
+        scrapped_subq = session.query(Scrap.article_id).distinct().subquery()
         deleted = (
             session.query(Article)
             .filter(Article.date < cutoff)
@@ -86,12 +91,10 @@ def cleanup_old_articles(days: int = RETENTION_DAYS) -> int:
 
 
 def _scheduled_cleanup():
-    """일일 정리 작업."""
     cleanup_old_articles()
 
 
 def _update_scheduler_interval():
-    """DB 설정에서 크롤링 주기를 읽어 스케줄러 업데이트."""
     session = SessionLocal()
     try:
         settings = session.query(Settings).first()
@@ -99,16 +102,12 @@ def _update_scheduler_interval():
     finally:
         session.close()
 
-    # 기존 작업 제거 후 재등록
     if scheduler.get_job("crawl_job"):
         scheduler.remove_job("crawl_job")
 
     scheduler.add_job(
-        _scheduled_crawl,
-        "interval",
-        minutes=interval,
-        id="crawl_job",
-        replace_existing=True,
+        _scheduled_crawl, "interval", minutes=interval,
+        id="crawl_job", replace_existing=True,
     )
     logger.info(f"📅 크롤링 스케줄: {interval}분 간격")
 
@@ -118,190 +117,258 @@ def _update_scheduler_interval():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """앱 시작/종료 시 실행."""
-    # 시작 시 DB 초기화
     init_db()
-    
-    # 즉시 크롤링을 백그라운드 스레드에서 실행하여 서버 구동 차단 방지
-    def background_crawl():
+
+    # 테스트 환경 (VCNEWS_DISABLE_SCHEDULER=1) 에선 백그라운드 작업 비활성화
+    if os.environ.get("VCNEWS_DISABLE_SCHEDULER") != "1":
+        def background_crawl():
+            try:
+                run_news_crawl()
+            except Exception as e:
+                logger.error(f"초기 크롤링 오류: {e}")
+        threading.Thread(target=background_crawl, daemon=True).start()
+
         try:
-            run_news_crawl()
+            cleanup_old_articles()
         except Exception as e:
-            logger.error(f"초기 크롤링 오류: {e}")
-            
-    threading.Thread(target=background_crawl, daemon=True).start()
+            logger.error(f"시작 시 정리 오류: {e}")
 
-    # 시작 즉시 1회 정리 (오래된 기사 삭제)
-    try:
-        cleanup_old_articles()
-    except Exception as e:
-        logger.error(f"시작 시 정리 오류: {e}")
-
-    # 스케줄러 설정
-    _update_scheduler_interval()
-
-    # 매일 03:30 KST에 오래된 기사 정리
-    scheduler.add_job(
-        _scheduled_cleanup,
-        "cron",
-        hour=3,
-        minute=30,
-        id="cleanup_job",
-        replace_existing=True,
-    )
-
-    scheduler.start()
+        _update_scheduler_interval()
+        scheduler.add_job(
+            _scheduled_cleanup, "cron", hour=3, minute=30,
+            id="cleanup_job", replace_existing=True,
+        )
+        scheduler.start()
 
     yield
-    scheduler.shutdown()
+
+    if scheduler.running:
+        scheduler.shutdown()
 
 
-app = FastAPI(title="VC News Platform", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="VC News Platform", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # ─── Pydantic 스키마 ───────────────────────────────────────
 
 
-class ArticleResponse(BaseModel):
-    id: int
-    source: str
-    source_label: str
-    date: str
-    title: str
-    link: str
-    is_scrapped: bool = False
+class SignupRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=4, max_length=128)
+    remember: bool = False
 
-    class Config:
-        from_attributes = True
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    remember: bool = False
 
 
 class SettingsUpdate(BaseModel):
+    # 서버 전역 (admin)
     crawl_interval_minutes: Optional[int] = None
+    # 유저별
     notifications_enabled: Optional[bool] = None
     notify_vc_notices: Optional[bool] = None
     notify_kip_news: Optional[bool] = None
 
 
-class SettingsResponse(BaseModel):
-    crawl_interval_minutes: int
-    notifications_enabled: bool
-    notify_vc_notices: bool
-    notify_kip_news: bool
-    # 소스별 키워드 — {"vc_notices": [...], "kip_news": [...]}
-    keywords: dict[str, list[str]]
-
-    class Config:
-        from_attributes = True
-
-
 class KeywordRequest(BaseModel):
     keyword: str
-    source: str  # 'vc_notices' | 'kip_news'
+    source: str
 
 
-# ─── API 엔드포인트 ────────────────────────────────────────
+# ─── 인증 엔드포인트 ───────────────────────────────────────
 
-# 기사 목록 (탭별)
+def _set_session_cookie(response: Response, token: str, remember: bool = False):
+    """remember=True 면 30일 영속 쿠키, False 면 세션 쿠키(브라우저/앱 종료 시 소멸).
+
+    세션 쿠키: max_age/expires 둘 다 안 보내면 브라우저가 세션 종료 시 폐기.
+    영속 쿠키: max_age 로 만료 명시 → 디바이스 재부팅 후에도 유지.
+    """
+    kwargs = dict(
+        key=JWT_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+    if remember:
+        kwargs["max_age"] = JWT_EXPIRE_DAYS * 24 * 3600
+    response.set_cookie(**kwargs)
+
+
+@app.post("/api/auth/signup")
+def signup(data: SignupRequest, response: Response):
+    username = data.username.strip().lower()
+    if len(username) < 3:
+        raise HTTPException(400, "아이디는 3자 이상이어야 합니다")
+    if not username.replace("_", "").isalnum():
+        raise HTTPException(400, "아이디는 영문/숫자/_ 만 사용 가능합니다")
+
+    session = SessionLocal()
+    try:
+        if session.query(User).filter(User.username == username).first():
+            raise HTTPException(409, "이미 사용 중인 아이디입니다")
+        user = User(
+            username=username,
+            password_hash=hash_password(data.password),
+            is_admin=False,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        session.add(UserPreferences(user_id=user.id))
+        session.commit()
+
+        token = issue_token(user.id, user.username)
+        _set_session_cookie(response, token, remember=data.remember)
+        return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
+    finally:
+        session.close()
+
+
+@app.post("/api/auth/login")
+def login(data: LoginRequest, response: Response):
+    username = data.username.strip().lower()
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.username == username).first()
+        if not user or not verify_password(data.password, user.password_hash):
+            raise HTTPException(401, "아이디 또는 비밀번호가 올바르지 않습니다")
+        # 환경설정 행 보장 (레거시 admin 대비)
+        if not session.query(UserPreferences).filter(
+            UserPreferences.user_id == user.id
+        ).first():
+            session.add(UserPreferences(user_id=user.id))
+            session.commit()
+
+        token = issue_token(user.id, user.username)
+        _set_session_cookie(response, token, remember=data.remember)
+        return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
+    finally:
+        session.close()
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response):
+    response.delete_cookie(JWT_COOKIE_NAME, path="/")
+    return {"message": "로그아웃 완료"}
+
+
+@app.get("/api/auth/me")
+def me(user: User = Depends(get_current_user)):
+    return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
+
+
+# ─── 헬스체크 (인증 불필요) ────────────────────────────────
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
+
+# ─── 기사 목록 (인증 필요) ─────────────────────────────────
+
+
+def _scrapped_ids_for_user(session, user_id: int, article_ids: list[int]) -> set[int]:
+    if not article_ids:
+        return set()
+    return {
+        row[0] for row in session.query(Scrap.article_id)
+        .filter(Scrap.user_id == user_id)
+        .filter(Scrap.article_id.in_(article_ids))
+        .all()
+    }
+
+
 @app.get("/api/articles")
 def get_articles(
-    tab: str = Query("vc_notices", description="vc_notices 또는 kip_news"),
-    search: str = Query("", description="검색어"),
+    tab: str = Query("vc_notices"),
+    search: str = Query(""),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
+    user: User = Depends(get_current_user),
 ):
     session = SessionLocal()
     try:
-        # 탭별 소스 필터
         if tab == "vc_notices":
             source_keys = ["kvca", "kvic"]
         elif tab == "kip_news":
             source_keys = ["kip"]
         else:
-            raise HTTPException(400, "유효하지 않은 탭: vc_notices 또는 kip_news")
+            raise HTTPException(400, "유효하지 않은 탭")
 
         q = session.query(Article).filter(Article.source.in_(source_keys))
-
-        # 검색
         if search.strip():
             q = q.filter(Article.title.contains(search.strip()))
 
         total = q.count()
         articles = (
             q.order_by(desc(Article.date), desc(Article.id))
-            .offset((page - 1) * size)
-            .limit(size)
-            .all()
+            .offset((page - 1) * size).limit(size).all()
         )
 
-        # 스크랩 여부 조회
-        article_ids = [a.id for a in articles]
-        scrapped_ids = set(
-            row[0] for row in session.query(Scrap.article_id)
-            .filter(Scrap.article_id.in_(article_ids))
-            .all()
-        ) if article_ids else set()
+        scrapped_ids = _scrapped_ids_for_user(
+            session, user.id, [a.id for a in articles],
+        )
 
-        result = []
-        for a in articles:
-            result.append({
-                "id": a.id,
-                "source": a.source,
-                "source_label": a.source_label,
-                "date": a.date,
-                "title": a.title,
-                "link": a.link,
+        return {
+            "total": total, "page": page, "size": size,
+            "articles": [{
+                "id": a.id, "source": a.source, "source_label": a.source_label,
+                "date": a.date, "title": a.title, "link": a.link,
                 "is_scrapped": a.id in scrapped_ids,
-            })
-
-        return {"total": total, "page": page, "size": size, "articles": result}
+            } for a in articles],
+        }
     finally:
         session.close()
 
 
-# 신규 기사 (모바일 알림 폴링용)
 @app.get("/api/articles/new")
 def get_new_articles(
-    since_id: int = Query(0, ge=0, description="이 ID보다 큰 기사만 반환 (0이면 베이스라인 동기화)"),
+    since_id: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    user: User = Depends(get_current_user),
 ):
-    """알림 설정과 키워드 필터를 서버에서 적용해 신규 기사만 반환.
+    """유저별 알림 필터 적용 — 마지막으로 본 id 이후의 신규 기사.
 
-    응답 형식:
-      {
-        "articles": [...],   # 최신순 (id DESC)
-        "latest_id": int,    # DB 내 최신 article id — 클라이언트 베이스라인용
-      }
-
-    사용 패턴 (Android WorkManager):
-      1) 최초 실행: since_id=0 호출 → 응답의 latest_id를 저장만 하고 알림 표시 안함
-      2) 이후 실행: since_id=<저장된 마지막 id> 호출 → articles를 알림으로 표시
+    내부 규칙 (응답에는 노출 안 됨):
+      kip_news 키워드에 '한국투자파트너스' 가 포함되어 있으면,
+      해당 키워드로 크롤링된 모든 기사(article.nate_query == '한국투자파트너스')도 알림 매칭.
     """
     session = SessionLocal()
     try:
         latest_id = session.query(func.max(Article.id)).scalar() or 0
 
-        settings = session.query(Settings).first()
-        if not settings or not settings.notifications_enabled:
+        prefs = session.query(UserPreferences).filter(
+            UserPreferences.user_id == user.id
+        ).first()
+        if not prefs or not prefs.notifications_enabled:
             return {"articles": [], "latest_id": latest_id}
 
-        # 소스별 키워드 로딩 — 비어있으면 해당 소스는 키워드 필터 없이 전건 알림.
         vc_keywords: list[str] = []
         kip_keywords: list[str] = []
-        for kw in session.query(NotificationKeyword).all():
+        for kw in session.query(NotificationKeyword).filter(
+            NotificationKeyword.user_id == user.id
+        ).all():
             if kw.source == "vc_notices":
                 vc_keywords.append(kw.keyword)
             elif kw.source == "kip_news":
                 kip_keywords.append(kw.keyword)
 
-        # 활성 소스(토글) × 소스별 키워드 필터를 결합
         clauses = []
-        if settings.notify_vc_notices:
+
+        if prefs.notify_vc_notices:
             vc_clause = Article.source.in_(["kvca", "kvic"])
             if vc_keywords:
                 vc_clause = and_(
@@ -309,147 +376,170 @@ def get_new_articles(
                     or_(*[Article.title.contains(k) for k in vc_keywords]),
                 )
             clauses.append(vc_clause)
-        if settings.notify_kip_news:
+
+        if prefs.notify_kip_news:
             kip_clause = Article.source == "kip"
             if kip_keywords:
-                kip_clause = and_(
-                    kip_clause,
-                    or_(*[Article.title.contains(k) for k in kip_keywords]),
-                )
+                title_or = or_(*[Article.title.contains(k) for k in kip_keywords])
+                # 비공개 규칙: '한국투자파트너스' 키워드 → nate_query 기반 매칭 추가
+                if _KIP_QUERY_HIDDEN_KEYWORD in kip_keywords:
+                    title_or = or_(
+                        title_or,
+                        Article.nate_query == _KIP_QUERY_HIDDEN_KEYWORD,
+                    )
+                kip_clause = and_(kip_clause, title_or)
             clauses.append(kip_clause)
 
         if not clauses:
             return {"articles": [], "latest_id": latest_id}
 
-        q = (
+        articles = (
             session.query(Article)
             .filter(Article.id > since_id)
             .filter(or_(*clauses))
+            .order_by(desc(Article.id))
+            .limit(limit)
+            .all()
         )
-
-        articles = q.order_by(desc(Article.id)).limit(limit).all()
 
         return {
             "latest_id": latest_id,
-            "articles": [
-                {
-                    "id": a.id,
-                    "source": a.source,
-                    "source_label": a.source_label,
-                    "date": a.date,
-                    "title": a.title,
-                    "link": a.link,
-                }
-                for a in articles
-            ],
+            "articles": [{
+                "id": a.id, "source": a.source, "source_label": a.source_label,
+                "date": a.date, "title": a.title, "link": a.link,
+            } for a in articles],
         }
     finally:
         session.close()
 
 
-# 스크랩 목록
+# ─── 스크랩 ────────────────────────────────────────────────
+
+
 @app.get("/api/scraps")
 def get_scraps(
-    search: str = Query("", description="검색어"),
+    search: str = Query(""),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
+    user: User = Depends(get_current_user),
 ):
     session = SessionLocal()
     try:
         q = (
             session.query(Article)
             .join(Scrap, Article.id == Scrap.article_id)
+            .filter(Scrap.user_id == user.id)
         )
-
         if search.strip():
             q = q.filter(Article.title.contains(search.strip()))
 
         total = q.count()
         articles = (
             q.order_by(desc(Scrap.created_at))
-            .offset((page - 1) * size)
-            .limit(size)
-            .all()
+            .offset((page - 1) * size).limit(size).all()
         )
 
-        result = []
-        for a in articles:
-            result.append({
-                "id": a.id,
-                "source": a.source,
-                "source_label": a.source_label,
-                "date": a.date,
-                "title": a.title,
-                "link": a.link,
+        return {
+            "total": total, "page": page, "size": size,
+            "articles": [{
+                "id": a.id, "source": a.source, "source_label": a.source_label,
+                "date": a.date, "title": a.title, "link": a.link,
                 "is_scrapped": True,
-            })
-
-        return {"total": total, "page": page, "size": size, "articles": result}
+            } for a in articles],
+        }
     finally:
         session.close()
 
 
-# 스크랩 토글
 @app.post("/api/scraps/{article_id}")
-def toggle_scrap(article_id: int):
+def toggle_scrap(article_id: int, user: User = Depends(get_current_user)):
     session = SessionLocal()
     try:
         article = session.query(Article).get(article_id)
         if not article:
             raise HTTPException(404, "기사를 찾을 수 없습니다")
 
-        existing = session.query(Scrap).filter(Scrap.article_id == article_id).first()
+        existing = session.query(Scrap).filter(
+            Scrap.user_id == user.id,
+            Scrap.article_id == article_id,
+        ).first()
         if existing:
             session.delete(existing)
             session.commit()
             return {"scrapped": False, "message": "스크랩 해제"}
         else:
-            session.add(Scrap(article_id=article_id))
+            session.add(Scrap(user_id=user.id, article_id=article_id))
             session.commit()
             return {"scrapped": True, "message": "스크랩 완료"}
     finally:
         session.close()
 
 
-# 설정 조회
+# ─── 설정 (유저별 + 서버) ──────────────────────────────────
+
+
 @app.get("/api/settings")
-def get_settings():
+def get_settings(user: User = Depends(get_current_user)):
     session = SessionLocal()
     try:
-        settings = session.query(Settings).first()
+        prefs = session.query(UserPreferences).filter(
+            UserPreferences.user_id == user.id
+        ).first()
+        if not prefs:
+            prefs = UserPreferences(user_id=user.id)
+            session.add(prefs)
+            session.commit()
+
+        server_settings = session.query(Settings).first()
+
         keywords: dict[str, list[str]] = {src: [] for src in NOTIFICATION_SOURCES}
-        for kw in session.query(NotificationKeyword).order_by(NotificationKeyword.id).all():
+        for kw in session.query(NotificationKeyword).filter(
+            NotificationKeyword.user_id == user.id
+        ).order_by(NotificationKeyword.id).all():
             if kw.source in keywords:
                 keywords[kw.source].append(kw.keyword)
+
         return {
-            "crawl_interval_minutes": settings.crawl_interval_minutes,
-            "notifications_enabled": settings.notifications_enabled,
-            "notify_vc_notices": settings.notify_vc_notices,
-            "notify_kip_news": settings.notify_kip_news,
+            "crawl_interval_minutes": server_settings.crawl_interval_minutes,
+            "notifications_enabled": prefs.notifications_enabled,
+            "notify_vc_notices": prefs.notify_vc_notices,
+            "notify_kip_news": prefs.notify_kip_news,
             "keywords": keywords,
+            "is_admin": user.is_admin,
         }
     finally:
         session.close()
 
 
-# 설정 업데이트
 @app.put("/api/settings")
-def update_settings(data: SettingsUpdate):
+def update_settings(data: SettingsUpdate, user: User = Depends(get_current_user)):
     session = SessionLocal()
     try:
-        settings = session.query(Settings).first()
-        if data.crawl_interval_minutes is not None:
-            settings.crawl_interval_minutes = max(30, data.crawl_interval_minutes)
+        prefs = session.query(UserPreferences).filter(
+            UserPreferences.user_id == user.id
+        ).first()
+        if not prefs:
+            prefs = UserPreferences(user_id=user.id)
+            session.add(prefs)
+            session.flush()
+
         if data.notifications_enabled is not None:
-            settings.notifications_enabled = data.notifications_enabled
+            prefs.notifications_enabled = data.notifications_enabled
         if data.notify_vc_notices is not None:
-            settings.notify_vc_notices = data.notify_vc_notices
+            prefs.notify_vc_notices = data.notify_vc_notices
         if data.notify_kip_news is not None:
-            settings.notify_kip_news = data.notify_kip_news
+            prefs.notify_kip_news = data.notify_kip_news
+
+        # 크롤링 주기 변경은 admin 만
+        if data.crawl_interval_minutes is not None:
+            if not user.is_admin:
+                raise HTTPException(403, "크롤링 주기는 관리자만 변경할 수 있습니다")
+            server_settings = session.query(Settings).first()
+            server_settings.crawl_interval_minutes = max(30, data.crawl_interval_minutes)
+
         session.commit()
 
-        # 스케줄러 간격 업데이트
-        if data.crawl_interval_minutes is not None:
+        if data.crawl_interval_minutes is not None and scheduler.running:
             _update_scheduler_interval()
 
         return {"message": "설정 저장 완료"}
@@ -457,37 +547,43 @@ def update_settings(data: SettingsUpdate):
         session.close()
 
 
-# 키워드 추가 (소스별)
+# ─── 키워드 (유저별) ───────────────────────────────────────
+
+
 @app.post("/api/keywords")
-def add_keyword(data: KeywordRequest):
+def add_keyword(data: KeywordRequest, user: User = Depends(get_current_user)):
     if data.source not in NOTIFICATION_SOURCES:
         raise HTTPException(400, f"유효하지 않은 source: {data.source}")
+    kw = data.keyword.strip()
+    if not kw:
+        raise HTTPException(400, "키워드를 입력하세요")
+
     session = SessionLocal()
     try:
-        kw = data.keyword.strip()
-        if not kw:
-            raise HTTPException(400, "키워드를 입력하세요")
         existing = session.query(NotificationKeyword).filter(
+            NotificationKeyword.user_id == user.id,
             NotificationKeyword.keyword == kw,
             NotificationKeyword.source == data.source,
         ).first()
         if existing:
             raise HTTPException(409, "이미 등록된 키워드입니다")
-        session.add(NotificationKeyword(keyword=kw, source=data.source))
+        session.add(NotificationKeyword(
+            user_id=user.id, keyword=kw, source=data.source,
+        ))
         session.commit()
         return {"message": f"키워드 '{kw}' 추가 완료", "source": data.source}
     finally:
         session.close()
 
 
-# 키워드 삭제 (소스별)
 @app.delete("/api/keywords/{source}/{keyword}")
-def delete_keyword(source: str, keyword: str):
+def delete_keyword(source: str, keyword: str, user: User = Depends(get_current_user)):
     if source not in NOTIFICATION_SOURCES:
         raise HTTPException(400, f"유효하지 않은 source: {source}")
     session = SessionLocal()
     try:
         kw = session.query(NotificationKeyword).filter(
+            NotificationKeyword.user_id == user.id,
             NotificationKeyword.keyword == keyword,
             NotificationKeyword.source == source,
         ).first()
@@ -500,9 +596,13 @@ def delete_keyword(source: str, keyword: str):
         session.close()
 
 
-# 수동 크롤링 트리거
+# ─── 수동 크롤링 (admin) ──────────────────────────────────
+
+
 @app.post("/api/crawl")
-def trigger_crawl():
+def trigger_crawl(user: User = Depends(get_current_user)):
+    if not user.is_admin:
+        raise HTTPException(403, "관리자만 수동 크롤링이 가능합니다")
     try:
         result = run_news_crawl()
         return {"message": "크롤링 완료", "log": result}
@@ -512,7 +612,6 @@ def trigger_crawl():
 
 # ─── 정적 파일 & SPA 폴백 ──────────────────────────────────
 
-# static 폴더가 있으면 마운트
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

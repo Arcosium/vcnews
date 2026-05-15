@@ -1,6 +1,8 @@
 /**
- * VC News Platform — Frontend Application
- * 4-tab SPA: 벤처공고 | KIP News | 스크랩 | 설정
+ * VC News Platform — Frontend (다중 사용자).
+ *
+ * 부팅 시 /api/auth/me 로 세션 확인 → 비인증이면 로그인 화면, 인증이면 메인 SPA.
+ * 모든 API 호출은 동일 출처 → 쿠키 자동 포함.
  */
 
 (function () {
@@ -18,17 +20,26 @@
         settings: null,
         isLoading: false,
         searchDebounce: null,
-        // 진행 중인 fetch 취소용 — 탭 전환 시 이전 요청을 즉시 중단해서
-        // 응답 순서 뒤바뀜과 'database is locked' 류 일시 오류를 막는다.
         currentAbort: null,
+        user: null,                  // { id, username, is_admin }
+        authMode: 'login',           // 'login' | 'signup'
     };
 
-    // ─── DOM References ──────────────────────────────────
+    // ─── DOM ─────────────────────────────────────────────
 
     const $ = (sel) => document.querySelector(sel);
     const $$ = (sel) => document.querySelectorAll(sel);
 
     const dom = {
+        authScreen: $('#auth-screen'),
+        authForm: $('#auth-form'),
+        authUsername: $('#auth-username'),
+        authPassword: $('#auth-password'),
+        authRemember: $('#auth-remember'),
+        authSubmit: $('#auth-submit'),
+        authSubmitLabel: $('.auth-submit-label'),
+        authError: $('#auth-error'),
+        app: $('#app'),
         articlesList: $('#articles-list'),
         articlesContainer: $('#articles-container'),
         settingsPanel: $('#settings-panel'),
@@ -37,8 +48,11 @@
         searchInput: $('#search-input'),
         searchClear: $('#search-clear'),
         btnRefresh: $('#btn-refresh'),
+        btnUser: $('#btn-user'),
+        userLabel: $('#user-label'),
+        btnLogout: $('#btn-logout'),
         toast: $('#toast'),
-        // Settings
+        settingsCrawlInterval: $('#settings-crawl-interval'),
         crawlInterval: $('#crawl-interval'),
         toggleNotifications: $('#toggle-notifications'),
         toggleVc: $('#toggle-vc'),
@@ -56,68 +70,102 @@
 
     // ─── API ─────────────────────────────────────────────
 
+    async function apiFetch(path, opts = {}) {
+        const res = await fetch(path, {
+            credentials: 'same-origin',
+            headers: {
+                ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+                ...(opts.headers || {}),
+            },
+            ...opts,
+        });
+        return res;
+    }
+
     const API = {
+        async me() {
+            const res = await apiFetch('/api/auth/me');
+            if (res.status === 401) return null;
+            if (!res.ok) throw new Error('me failed');
+            return res.json();
+        },
+        async login(username, password, remember) {
+            const res = await apiFetch('/api/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({ username, password, remember: !!remember }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || '로그인 실패');
+            return data;
+        },
+        async signup(username, password, remember) {
+            const res = await apiFetch('/api/auth/signup', {
+                method: 'POST',
+                body: JSON.stringify({ username, password, remember: !!remember }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || '회원가입 실패');
+            return data;
+        },
+        async logout() {
+            await apiFetch('/api/auth/logout', { method: 'POST' });
+        },
         async getArticles(tab, search = '', page = 1, size = 50, signal) {
             const params = new URLSearchParams({ tab, search, page, size });
-            const res = await fetch(`/api/articles?${params}`, { signal });
+            const res = await apiFetch(`/api/articles?${params}`, { signal });
             if (!res.ok) throw new Error('Failed to fetch articles');
             return res.json();
         },
-
         async getScraps(search = '', page = 1, size = 50, signal) {
             const params = new URLSearchParams({ search, page, size });
-            const res = await fetch(`/api/scraps?${params}`, { signal });
+            const res = await apiFetch(`/api/scraps?${params}`, { signal });
             if (!res.ok) throw new Error('Failed to fetch scraps');
             return res.json();
         },
-
         async toggleScrap(articleId) {
-            const res = await fetch(`/api/scraps/${articleId}`, { method: 'POST' });
+            const res = await apiFetch(`/api/scraps/${articleId}`, { method: 'POST' });
             if (!res.ok) throw new Error('Failed to toggle scrap');
             return res.json();
         },
-
         async getSettings() {
-            const res = await fetch('/api/settings');
+            const res = await apiFetch('/api/settings');
             if (!res.ok) throw new Error('Failed to fetch settings');
             return res.json();
         },
-
         async updateSettings(data) {
-            const res = await fetch('/api/settings', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data),
-            });
-            if (!res.ok) throw new Error('Failed to update settings');
-            return res.json();
-        },
-
-        async addKeyword(keyword, source) {
-            const res = await fetch('/api/keywords', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keyword, source }),
+            const res = await apiFetch('/api/settings', {
+                method: 'PUT', body: JSON.stringify(data),
             });
             if (!res.ok) {
-                const err = await res.json();
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || 'Failed to update settings');
+            }
+            return res.json();
+        },
+        async addKeyword(keyword, source) {
+            const res = await apiFetch('/api/keywords', {
+                method: 'POST', body: JSON.stringify({ keyword, source }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
                 throw new Error(err.detail || 'Failed to add keyword');
             }
             return res.json();
         },
-
         async deleteKeyword(keyword, source) {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/keywords/${encodeURIComponent(source)}/${encodeURIComponent(keyword)}`,
                 { method: 'DELETE' }
             );
             if (!res.ok) throw new Error('Failed to delete keyword');
             return res.json();
         },
-
         async triggerCrawl() {
-            const res = await fetch('/api/crawl', { method: 'POST' });
-            if (!res.ok) throw new Error('Failed to trigger crawl');
+            const res = await apiFetch('/api/crawl', { method: 'POST' });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || 'Failed to trigger crawl');
+            }
             return res.json();
         },
     };
@@ -125,68 +173,144 @@
     // ─── Toast ───────────────────────────────────────────
 
     let toastTimer = null;
-
     function showToast(message, type = '') {
         clearTimeout(toastTimer);
         dom.toast.textContent = message;
         dom.toast.className = 'toast show' + (type ? ` ${type}` : '');
-        toastTimer = setTimeout(() => {
-            dom.toast.classList.remove('show');
-        }, 2500);
+        toastTimer = setTimeout(() => dom.toast.classList.remove('show'), 2500);
     }
 
-    // ─── Render Articles ─────────────────────────────────
+    // ─── Auth UI ─────────────────────────────────────────
+
+    function showAuthScreen() {
+        dom.authScreen.classList.remove('hidden');
+        dom.app.classList.add('hidden');
+        setAuthMode('login');
+        dom.authPassword.value = '';
+        // 마지막 선택 복원 — 사용자가 한 번 켜놨으면 그 상태 유지
+        try {
+            dom.authRemember.checked = localStorage.getItem('vcnews.remember') === '1';
+        } catch (_) {
+            dom.authRemember.checked = false;
+        }
+        dom.authUsername.focus();
+    }
+
+    function showApp() {
+        dom.authScreen.classList.add('hidden');
+        dom.app.classList.remove('hidden');
+        dom.userLabel.textContent = state.user.username;
+        dom.btnRefresh.classList.toggle('hidden', !state.user.is_admin);
+        dom.settingsCrawlInterval.classList.toggle('hidden', !state.user.is_admin);
+    }
+
+    function setAuthMode(mode) {
+        state.authMode = mode;
+        $$('.auth-tab').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+        dom.authSubmitLabel.textContent = mode === 'signup' ? '회원가입' : '로그인';
+        const submitIcon = dom.authSubmit.querySelector('.material-icons-round');
+        if (submitIcon) submitIcon.textContent = mode === 'signup' ? 'person_add' : 'login';
+        dom.authPassword.autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
+        clearAuthError();
+    }
+
+    function showAuthError(msg) {
+        dom.authError.textContent = msg;
+        dom.authError.classList.remove('hidden');
+    }
+    function clearAuthError() {
+        dom.authError.textContent = '';
+        dom.authError.classList.add('hidden');
+    }
+
+    async function handleAuthSubmit(e) {
+        e.preventDefault();
+        clearAuthError();
+        const username = dom.authUsername.value.trim();
+        const password = dom.authPassword.value;
+        const remember = !!dom.authRemember.checked;
+        if (!username || !password) {
+            showAuthError('아이디와 비밀번호를 입력하세요');
+            return;
+        }
+        // 자동 로그인 체크 상태를 로컬에 보존 — 다음에 로그인 화면 떴을 때 복원
+        try { localStorage.setItem('vcnews.remember', remember ? '1' : '0'); } catch (_) {}
+        dom.authSubmit.disabled = true;
+        try {
+            const data = state.authMode === 'signup'
+                ? await API.signup(username, password, remember)
+                : await API.login(username, password, remember);
+            state.user = data;
+            showApp();
+            await switchTab('vc_notices');
+        } catch (err) {
+            showAuthError(err.message || '오류가 발생했습니다');
+        } finally {
+            dom.authSubmit.disabled = false;
+        }
+    }
+
+    async function handleLogout() {
+        try { await API.logout(); } catch (_) { /* ignore */ }
+        state.user = null;
+        showAuthScreen();
+    }
+
+    // ─── Articles render (DOM API, no innerHTML) ─────────
+
+    function el(tag, opts = {}, ...children) {
+        const e = document.createElement(tag);
+        if (opts.class) e.className = opts.class;
+        if (opts.text != null) e.textContent = opts.text;
+        if (opts.attrs) {
+            for (const [k, v] of Object.entries(opts.attrs)) {
+                e.setAttribute(k, v);
+            }
+        }
+        if (opts.title) e.title = opts.title;
+        if (opts.on) {
+            for (const [evt, fn] of Object.entries(opts.on)) {
+                e.addEventListener(evt, fn);
+            }
+        }
+        for (const child of children) {
+            if (child == null) continue;
+            e.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+        }
+        return e;
+    }
+
+    function icon(name) {
+        return el('span', { class: 'material-icons-round', text: name });
+    }
 
     function createArticleCard(article) {
-        const card = document.createElement('div');
-        card.className = 'article-card';
-        card.setAttribute('data-id', article.id);
+        // 벤처뉴스(kip) 는 배지 없이 — 같은 탭 안에 있어 식별 불필요.
+        // KVCA/KVIC 는 벤처공고 탭에서 두 소스 구분 위해 배지 유지.
+        const showSourceTag = article.source !== 'kip';
+        const sourceTag = article.source.toUpperCase();
 
-        const sourceClass = article.source === 'kip' ? 'kip' : '';
-        const sourceTag = article.source === 'kip' ? 'KIP' : article.source.toUpperCase();
-        const scrapClass = article.is_scrapped ? 'active' : '';
+        const scrapBtn = el('button',
+            { class: `btn-scrap${article.is_scrapped ? ' active' : ''}`, title: '스크랩',
+              attrs: { 'data-article-id': String(article.id) } },
+            icon(article.is_scrapped ? 'star' : 'star_border'),
+        );
 
-        card.innerHTML = `
-            <button class="btn-scrap ${scrapClass}" data-article-id="${article.id}" title="스크랩">
-                <span class="material-icons-round">${article.is_scrapped ? 'star' : 'star_border'}</span>
-            </button>
-            <div class="article-body">
-                <div class="article-meta">
-                    <span class="article-date">${article.date}</span>
-                    <span class="article-source-tag ${sourceClass}">${sourceTag}</span>
-                </div>
-                <div class="article-title">${escapeHtml(article.title)}</div>
-                <a href="${escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer" class="btn-link">
-                    <span class="material-icons-round">open_in_new</span>
-                    링크 이동
-                </a>
-            </div>
-        `;
-
-        // Scrap toggle handler
-        const scrapBtn = card.querySelector('.btn-scrap');
         scrapBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
             try {
                 const result = await API.toggleScrap(article.id);
                 article.is_scrapped = result.scrapped;
-
                 scrapBtn.classList.toggle('active', result.scrapped);
-                scrapBtn.querySelector('.material-icons-round').textContent =
-                    result.scrapped ? 'star' : 'star_border';
-
+                scrapBtn.replaceChildren(icon(result.scrapped ? 'star' : 'star_border'));
                 showToast(result.message, 'success');
-
-                // If on scraps tab and unscrapped, remove the card
                 if (state.currentTab === 'scraps' && !result.scrapped) {
                     card.style.transition = 'all 0.3s ease';
                     card.style.opacity = '0';
                     card.style.transform = 'translateX(-20px)';
                     setTimeout(() => {
                         card.remove();
-                        if (dom.articlesList.children.length === 0) {
-                            showEmptyState();
-                        }
+                        if (dom.articlesList.children.length === 0) showEmptyState();
                     }, 300);
                 }
             } catch (err) {
@@ -194,125 +318,108 @@
             }
         });
 
+        const meta = el('div', { class: 'article-meta' },
+            el('span', { class: 'article-date', text: article.date }),
+            showSourceTag
+                ? el('span', { class: 'article-source-tag', text: sourceTag })
+                : null,
+        );
+
+        const titleEl = el('div', { class: 'article-title', text: article.title });
+
+        const link = el('a',
+            { class: 'btn-link',
+              attrs: { href: article.link, target: '_blank', rel: 'noopener noreferrer' } },
+            icon('open_in_new'),
+            ' 링크 이동',
+        );
+
+        const body = el('div', { class: 'article-body' }, meta, titleEl, link);
+        const card = el('div',
+            { class: 'article-card', attrs: { 'data-id': String(article.id) } },
+            scrapBtn, body,
+        );
         return card;
     }
 
     function renderArticles(articles) {
-        dom.articlesList.innerHTML = '';
-
+        dom.articlesList.replaceChildren();
         if (!articles || articles.length === 0) {
             showEmptyState();
             return;
         }
-
         hideEmptyState();
         const fragment = document.createDocumentFragment();
-        articles.forEach((article) => {
-            fragment.appendChild(createArticleCard(article));
-        });
+        articles.forEach((a) => fragment.appendChild(createArticleCard(a)));
         dom.articlesList.appendChild(fragment);
     }
 
     function showEmptyState() {
         dom.emptyState.classList.remove('hidden');
-        dom.articlesList.innerHTML = '';
+        dom.articlesList.replaceChildren();
     }
-
-    function hideEmptyState() {
-        dom.emptyState.classList.add('hidden');
-    }
-
+    function hideEmptyState() { dom.emptyState.classList.add('hidden'); }
     function showLoading() {
         state.isLoading = true;
         dom.loadingIndicator.classList.remove('hidden');
         dom.emptyState.classList.add('hidden');
     }
-
     function hideLoading() {
         state.isLoading = false;
         dom.loadingIndicator.classList.add('hidden');
     }
 
-    // ─── Tab Switching ───────────────────────────────────
+    // ─── Tabs ────────────────────────────────────────────
 
     async function switchTab(tab) {
         state.currentTab = tab;
         state.currentPage = 1;
 
-        // Update nav active state
         $$('.nav-item').forEach((btn) => {
             btn.classList.toggle('active', btn.dataset.tab === tab);
         });
 
-        // Show/hide panels
         const isSettings = tab === 'settings';
         dom.articlesContainer.classList.toggle('hidden', isSettings);
         dom.settingsPanel.classList.toggle('hidden', !isSettings);
         dom.searchBarContainer.classList.toggle('hidden', isSettings);
 
-        if (isSettings) {
-            await loadSettings();
-        } else {
-            await loadArticles();
-        }
+        if (isSettings) await loadSettings();
+        else await loadArticles();
     }
 
-    // ─── Load Data ───────────────────────────────────────
+    // ─── Data load ───────────────────────────────────────
 
     async function loadArticles() {
-        // 이전 요청을 즉시 취소 — 탭을 빠르게 전환할 때 오래된 응답이
-        // 새 탭에 덮어쓰는 것과 'AbortError' 외 다른 네트워크 에러로 둔갑하는 것을 막는다.
-        if (state.currentAbort) {
-            state.currentAbort.abort();
-        }
+        if (state.currentAbort) state.currentAbort.abort();
         const controller = new AbortController();
         state.currentAbort = controller;
-
-        // 탭 식별자를 캡쳐 — 응답이 돌아왔을 때 사용자가 이미 다른 탭으로
-        // 옮겼다면 무시한다.
         const requestedTab = state.currentTab;
 
         showLoading();
-        state.isLoading = true;
 
         try {
             let data;
             if (requestedTab === 'scraps') {
-                data = await API.getScraps(
-                    state.searchQuery, state.currentPage, state.pageSize, controller.signal
-                );
+                data = await API.getScraps(state.searchQuery, state.currentPage, state.pageSize, controller.signal);
             } else {
-                data = await API.getArticles(
-                    requestedTab,
-                    state.searchQuery,
-                    state.currentPage,
-                    state.pageSize,
-                    controller.signal
-                );
+                data = await API.getArticles(requestedTab, state.searchQuery, state.currentPage, state.pageSize, controller.signal);
             }
-
-            // 응답이 도착했을 때 현재 탭이 바뀌었거나 요청이 취소된 상태라면 버린다.
-            if (controller.signal.aborted || state.currentTab !== requestedTab) {
-                return;
-            }
+            if (controller.signal.aborted || state.currentTab !== requestedTab) return;
 
             state.articles = data.articles;
             state.totalArticles = data.total;
             renderArticles(state.articles);
         } catch (err) {
-            // 의도적 취소는 사용자에게 보일 오류가 아님
             if (err.name === 'AbortError') return;
+            const me = await API.me().catch(() => null);
+            if (!me) { state.user = null; showAuthScreen(); return; }
             showToast('데이터 로드 실패', 'error');
             console.error(err);
-            if (state.currentTab === requestedTab) {
-                showEmptyState();
-            }
+            if (state.currentTab === requestedTab) showEmptyState();
         } finally {
-            if (state.currentAbort === controller) {
-                state.currentAbort = null;
-                state.isLoading = false;
-                hideLoading();
-            }
+            if (state.currentAbort === controller) state.currentAbort = null;
+            hideLoading();
         }
     }
 
@@ -321,18 +428,20 @@
             const settings = await API.getSettings();
             state.settings = settings;
 
-            dom.crawlInterval.value = String(settings.crawl_interval_minutes);
+            if (state.user && state.user.is_admin) {
+                dom.crawlInterval.value = String(settings.crawl_interval_minutes);
+            }
             dom.toggleNotifications.checked = settings.notifications_enabled;
             dom.toggleVc.checked = settings.notify_vc_notices;
             dom.toggleKip.checked = settings.notify_kip_news;
-
             updateNotificationSubSettings();
 
-            // 소스별 키워드 렌더 — 서버는 항상 두 키를 보장.
             const kw = settings.keywords || {};
             renderKeywords('vc_notices', dom.keywordsListVc, kw.vc_notices || []);
             renderKeywords('kip_news', dom.keywordsListKip, kw.kip_news || []);
         } catch (err) {
+            const me = await API.me().catch(() => null);
+            if (!me) { state.user = null; showAuthScreen(); return; }
             showToast('설정 로드 실패', 'error');
             console.error(err);
         }
@@ -347,22 +456,17 @@
     function renderKeywords(source, listEl, keywords) {
         listEl.replaceChildren();
         keywords.forEach((kw) => {
-            const chip = document.createElement('div');
-            chip.className = 'keyword-chip';
+            const removeBtn = el('button', { class: 'btn-remove', title: '삭제' });
+            const removeIcon = icon('close');
+            removeIcon.style.fontSize = '14px';
+            removeBtn.appendChild(removeIcon);
 
-            const label = document.createElement('span');
-            label.textContent = kw;
+            const chip = el('div', { class: 'keyword-chip' },
+                el('span', { text: kw }),
+                removeBtn,
+            );
 
-            const btn = document.createElement('button');
-            btn.className = 'btn-remove';
-            btn.title = '삭제';
-            const icon = document.createElement('span');
-            icon.className = 'material-icons-round';
-            icon.style.fontSize = '14px';
-            icon.textContent = 'close';
-            btn.appendChild(icon);
-
-            btn.addEventListener('click', async () => {
+            removeBtn.addEventListener('click', async () => {
                 try {
                     await API.deleteKeyword(kw, source);
                     chip.style.transition = 'all 0.2s ease';
@@ -370,70 +474,61 @@
                     chip.style.transform = 'scale(0.8)';
                     setTimeout(() => chip.remove(), 200);
                     showToast(`키워드 '${kw}' 삭제됨`, 'success');
-                } catch (err) {
+                } catch (_) {
                     showToast('키워드 삭제 실패', 'error');
                 }
             });
-
-            chip.appendChild(label);
-            chip.appendChild(btn);
             listEl.appendChild(chip);
         });
     }
 
-    // ─── Event Handlers ──────────────────────────────────
+    // ─── Handlers ────────────────────────────────────────
 
     function initEventHandlers() {
-        // Tab navigation
+        $$('.auth-tab').forEach((b) => {
+            b.addEventListener('click', () => setAuthMode(b.dataset.mode));
+        });
+        dom.authForm.addEventListener('submit', handleAuthSubmit);
+
+        if (dom.btnLogout) dom.btnLogout.addEventListener('click', handleLogout);
+
         $$('.nav-item').forEach((btn) => {
             btn.addEventListener('click', () => switchTab(btn.dataset.tab));
         });
 
-        // Search
         dom.searchInput.addEventListener('input', () => {
             const val = dom.searchInput.value.trim();
             dom.searchClear.classList.toggle('hidden', !val);
-
             clearTimeout(state.searchDebounce);
             state.searchDebounce = setTimeout(() => {
                 state.searchQuery = val;
                 state.currentPage = 1;
-                if (state.currentTab !== 'settings') {
-                    loadArticles();
-                }
+                if (state.currentTab !== 'settings') loadArticles();
             }, 350);
         });
-
         dom.searchClear.addEventListener('click', () => {
             dom.searchInput.value = '';
             dom.searchClear.classList.add('hidden');
             state.searchQuery = '';
             state.currentPage = 1;
-            if (state.currentTab !== 'settings') {
-                loadArticles();
-            }
+            if (state.currentTab !== 'settings') loadArticles();
         });
 
-        // Refresh / manual crawl
         dom.btnRefresh.addEventListener('click', async () => {
             dom.btnRefresh.classList.add('spinning');
             try {
                 await API.triggerCrawl();
                 showToast('크롤링 완료!', 'success');
-                if (state.currentTab !== 'settings') {
-                    await loadArticles();
-                }
+                if (state.currentTab !== 'settings') await loadArticles();
             } catch (err) {
-                showToast('크롤링 실패', 'error');
+                showToast(err.message || '크롤링 실패', 'error');
             } finally {
                 dom.btnRefresh.classList.remove('spinning');
             }
         });
 
-        // Settings — notification master toggle
         dom.toggleNotifications.addEventListener('change', updateNotificationSubSettings);
 
-        // Settings — add keyword (소스별)
         const addKeywordFor = async (source, inputEl, listEl) => {
             const kw = inputEl.value.trim();
             if (!kw) return;
@@ -441,7 +536,6 @@
                 await API.addKeyword(kw, source);
                 inputEl.value = '';
                 showToast(`키워드 '${kw}' 추가됨`, 'success');
-                // 해당 소스만 재렌더 — 다른 소스는 건드릴 필요 없음
                 const settings = await API.getSettings();
                 const kwMap = settings.keywords || {};
                 renderKeywords(source, listEl, kwMap[source] || []);
@@ -461,28 +555,26 @@
             if (e.key === 'Enter') addKeywordFor('kip_news', dom.keywordInputKip, dom.keywordsListKip);
         });
 
-        // Settings — save
         dom.btnSaveSettings.addEventListener('click', async () => {
+            const payload = {
+                notifications_enabled: dom.toggleNotifications.checked,
+                notify_vc_notices: dom.toggleVc.checked,
+                notify_kip_news: dom.toggleKip.checked,
+            };
+            if (state.user && state.user.is_admin) {
+                payload.crawl_interval_minutes = parseInt(dom.crawlInterval.value, 10);
+            }
             try {
-                await API.updateSettings({
-                    crawl_interval_minutes: parseInt(dom.crawlInterval.value, 10),
-                    notifications_enabled: dom.toggleNotifications.checked,
-                    notify_vc_notices: dom.toggleVc.checked,
-                    notify_kip_news: dom.toggleKip.checked,
-                });
+                await API.updateSettings(payload);
                 showToast('설정이 저장되었습니다', 'success');
             } catch (err) {
-                showToast('설정 저장 실패', 'error');
+                showToast(err.message || '설정 저장 실패', 'error');
             }
         });
 
-        // Pull-to-refresh 제거됨 — 헤더의 새로고침 버튼만 사용.
-
-        // Infinite scroll
         const mainContent = $('#main-content');
         mainContent.addEventListener('scroll', () => {
             if (state.isLoading || state.currentTab === 'settings') return;
-
             const { scrollTop, scrollHeight, clientHeight } = mainContent;
             if (scrollTop + clientHeight >= scrollHeight - 100) {
                 if (state.articles.length < state.totalArticles) {
@@ -496,7 +588,6 @@
     async function loadMoreArticles() {
         if (state.isLoading) return;
         state.isLoading = true;
-
         const controller = new AbortController();
         const previousAbort = state.currentAbort;
         state.currentAbort = controller;
@@ -505,53 +596,41 @@
         try {
             let data;
             if (requestedTab === 'scraps') {
-                data = await API.getScraps(
-                    state.searchQuery, state.currentPage, state.pageSize, controller.signal
-                );
+                data = await API.getScraps(state.searchQuery, state.currentPage, state.pageSize, controller.signal);
             } else {
-                data = await API.getArticles(
-                    requestedTab,
-                    state.searchQuery,
-                    state.currentPage,
-                    state.pageSize,
-                    controller.signal
-                );
+                data = await API.getArticles(requestedTab, state.searchQuery, state.currentPage, state.pageSize, controller.signal);
             }
-
             if (controller.signal.aborted || state.currentTab !== requestedTab) return;
-
             if (data.articles.length > 0) {
                 state.articles.push(...data.articles);
                 const fragment = document.createDocumentFragment();
-                data.articles.forEach((article) => {
-                    fragment.appendChild(createArticleCard(article));
-                });
+                data.articles.forEach((a) => fragment.appendChild(createArticleCard(a)));
                 dom.articlesList.appendChild(fragment);
             }
         } catch (err) {
             if (err.name !== 'AbortError') console.error(err);
         } finally {
-            if (state.currentAbort === controller) {
-                state.currentAbort = previousAbort;
-            }
+            if (state.currentAbort === controller) state.currentAbort = previousAbort;
             state.isLoading = false;
         }
     }
 
-    // ─── Utilities ───────────────────────────────────────
-
-    function escapeHtml(str) {
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
     // ─── Init ────────────────────────────────────────────
 
-    function init() {
+    async function init() {
         initEventHandlers();
-        // Default tab
-        switchTab('vc_notices');
+        try {
+            const me = await API.me();
+            if (me) {
+                state.user = me;
+                showApp();
+                await switchTab('vc_notices');
+            } else {
+                showAuthScreen();
+            }
+        } catch (err) {
+            showAuthScreen();
+        }
     }
 
     if (document.readyState === 'loading') {

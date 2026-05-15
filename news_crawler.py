@@ -1,10 +1,11 @@
-"""뉴스 크롤링 엔진 — DB 기반 웹앱 버전.
+"""뉴스 크롤링 엔진 — 다중 키워드 지원.
 
-Google Sheets 의존성을 제거하고, SQLite DB(models.py)에 직접 저장합니다.
 크롤링 대상:
   1) KVCA — 벤처협회공고 (한국벤처캐피탈협회)
   2) KVIC — 벤처협회공고 (한국벤처투자)
-  3) KIP  — 한국투자파트너스 뉴스 (네이트 검색)
+  3) KIP  — 네이트뉴스 (3개 키워드 검색: 벤처캐피탈 / 벤처투자 / 한국투자파트너스)
+           각 기사에 nate_query 컬럼으로 어느 검색어로 들어왔는지 기록.
+           link 기준 중복 제거.
 
 사용법:
     from news_crawler import run_news_crawl
@@ -30,6 +31,9 @@ KST = datetime.timezone(datetime.timedelta(hours=9))
 
 # ─── 크롤링 대상 소스 정의 ─────────────────────────────────────
 
+# 네이트뉴스 검색 키워드 (KIP 소스로 통합 저장)
+NATE_QUERIES = ["벤처캐피탈", "벤처투자", "한국투자파트너스"]
+
 CRAWL_SOURCES = [
     {
         "key": "kvca",
@@ -43,12 +47,6 @@ CRAWL_SOURCES = [
         "tab": "vc_notices",
         "url": "https://www.kvic.or.kr/notice/kvic-notice/investment-business-notice",
     },
-    {
-        "key": "kip",
-        "label": "KIP News",
-        "tab": "kip_news",
-        "url": "https://news.nate.com/search?q=" + quote("한국투자파트너스"),
-    },
 ]
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -59,7 +57,6 @@ class NewsCrawlerError(RuntimeError):
 
 
 def _fetch_page(url: str) -> Optional[BeautifulSoup]:
-    """URL에서 HTML을 가져와 BeautifulSoup 객체로 반환."""
     try:
         r = requests.get(
             url,
@@ -74,7 +71,6 @@ def _fetch_page(url: str) -> Optional[BeautifulSoup]:
 
 
 def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
-    """KVCA 사이트에서 기사 파싱."""
     articles = []
     for tr in soup.find_all("tr"):
         tds = tr.find_all(["td", "th"])
@@ -86,9 +82,9 @@ def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
         date_str = ""
 
         for td in tds:
-            text = td.get_text(strip=True)
-            if text:
-                row_texts.append(text)
+            text_ = td.get_text(strip=True)
+            if text_:
+                row_texts.append(text_)
 
             a_tag = td.find("a")
             if a_tag and a_tag.get("href") and not a_tag["href"].startswith("#"):
@@ -102,8 +98,8 @@ def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
                 else:
                     link = urljoin(site_url, href)
 
-            date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text)
-            if not date_str and date_match and len(text) <= 12:
+            date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text_)
+            if not date_str and date_match and len(text_) <= 12:
                 date_str = date_match.group()
 
         if not link:
@@ -119,10 +115,8 @@ def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
 
 
 def _parse_kvic(soup: BeautifulSoup, site_url: str) -> list[dict]:
-    """KVIC 사이트에서 기사 파싱."""
     articles = []
 
-    # KVIC는 테이블 구조 또는 리스트 구조를 사용할 수 있음
     for tr in soup.find_all("tr"):
         tds = tr.find_all(["td", "th"])
         if not tds or len(tds) < 2:
@@ -133,9 +127,9 @@ def _parse_kvic(soup: BeautifulSoup, site_url: str) -> list[dict]:
         date_str = ""
 
         for td in tds:
-            text = td.get_text(strip=True)
-            if text:
-                row_texts.append(text)
+            text_ = td.get_text(strip=True)
+            if text_:
+                row_texts.append(text_)
 
             a_tag = td.find("a")
             if a_tag and a_tag.get("href") and not a_tag["href"].startswith("#"):
@@ -147,8 +141,8 @@ def _parse_kvic(soup: BeautifulSoup, site_url: str) -> list[dict]:
                 else:
                     link = urljoin(site_url, href)
 
-            date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text)
-            if not date_str and date_match and len(text) <= 12:
+            date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text_)
+            if not date_str and date_match and len(text_) <= 12:
                 date_str = date_match.group()
 
         if not link:
@@ -160,7 +154,6 @@ def _parse_kvic(soup: BeautifulSoup, site_url: str) -> list[dict]:
 
         articles.append({"date": date_str, "title": title, "link": link})
 
-    # 리스트 뷰 형태 폴백 (ul > li)
     for li in soup.select("ul.board-list li, .list-wrap li, .bbs-list li"):
         a_tag = li.find("a")
         if not a_tag or not a_tag.get("href"):
@@ -185,15 +178,13 @@ def _parse_kvic(soup: BeautifulSoup, site_url: str) -> list[dict]:
     return articles
 
 
-def _parse_nate_news(soup: BeautifulSoup, site_url: str) -> list[dict]:
-    """네이트 뉴스 검색 결과에서 기사 파싱."""
+def _parse_nate_news(soup: BeautifulSoup, site_url: str, query: str) -> list[dict]:
+    """네이트 뉴스 검색 결과 파싱. query 는 검색어 (fallback 매칭에만 사용)."""
     articles = []
 
-    # 네이트 검색결과 파싱 — 다양한 셀렉터 시도
     news_items = soup.select("div.news_list dl, ul.resultList li, div.newslist li, .news_cont")
 
     if not news_items:
-        # 테이블 폴백
         for tr in soup.find_all("tr"):
             tds = tr.find_all(["td", "th"])
             if not tds or len(tds) < 2:
@@ -202,14 +193,14 @@ def _parse_nate_news(soup: BeautifulSoup, site_url: str) -> list[dict]:
             link = ""
             date_str = ""
             for td in tds:
-                text = td.get_text(strip=True)
-                if text:
-                    row_texts.append(text)
+                text_ = td.get_text(strip=True)
+                if text_:
+                    row_texts.append(text_)
                 a_tag = td.find("a")
                 if a_tag and a_tag.get("href") and not a_tag["href"].startswith("#"):
                     link = urljoin(site_url, a_tag["href"])
-                date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text)
-                if not date_str and date_match and len(text) <= 12:
+                date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text_)
+                if not date_str and date_match and len(text_) <= 12:
                     date_str = date_match.group()
             if link:
                 title = " | ".join(row_texts)
@@ -244,30 +235,53 @@ def _parse_nate_news(soup: BeautifulSoup, site_url: str) -> list[dict]:
             if title:
                 articles.append({"date": date_str, "title": title, "link": link})
 
-    # 일반 앵커 링크 폴백 — 뉴스 관련 링크 추출
+    # 폴백: 일반 앵커에서 검색어 포함된 것만
     if not articles:
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            text = a.get_text(strip=True)
-            if not text or len(text) < 10:
+            text_ = a.get_text(strip=True)
+            if not text_ or len(text_) < 10:
                 continue
-            if "한국투자파트너스" in text or "한투" in text:
+            if query in text_:
                 link = href if href.startswith("http") else urljoin(site_url, href)
                 articles.append({
                     "date": datetime.datetime.now(KST).strftime("%Y-%m-%d"),
-                    "title": text,
+                    "title": text_,
                     "link": link,
                 })
 
     return articles
 
 
-# 소스별 파서 맵핑
 PARSERS = {
     "kvca": _parse_kvca,
     "kvic": _parse_kvic,
-    "kip": _parse_nate_news,
 }
+
+
+def _crawl_nate_all() -> list[dict]:
+    """3개 검색어로 네이트 크롤링. 결과는 link 기준 중복 제거.
+
+    각 dict 에 nate_query 필드 추가 — 어떤 키워드로 들어왔는지 기록.
+    중복 발생 시 *먼저 매칭된* 키워드를 유지 (NATE_QUERIES 순서대로).
+    """
+    seen_links: set[str] = set()
+    merged: list[dict] = []
+
+    for q in NATE_QUERIES:
+        url = "https://news.nate.com/search?q=" + quote(q)
+        soup = _fetch_page(url)
+        if not soup:
+            continue
+        parsed = _parse_nate_news(soup, url, q)
+        for art in parsed:
+            if art["link"] in seen_links:
+                continue
+            seen_links.add(art["link"])
+            art["nate_query"] = q
+            merged.append(art)
+
+    return merged
 
 
 def run_news_crawl(test_mode: bool = False) -> str:
@@ -286,11 +300,11 @@ def run_news_crawl(test_mode: bool = False) -> str:
     total_new = 0
 
     try:
-        # 기존 링크 캐시 (중복 검사용)
         existing_links = set(
             row[0] for row in session.query(Article.link).all()
         )
 
+        # ── KVCA / KVIC ───────────────────────────────────
         for source in CRAWL_SOURCES:
             key = source["key"]
             url = source["url"]
@@ -311,10 +325,8 @@ def run_news_crawl(test_mode: bool = False) -> str:
             parsed_articles = parser(soup, url)
             log(f"  · 파싱된 항목: {len(parsed_articles)}건")
 
-            # AI를 사용하여 제목 정제
             from .title_cleaner import clean_titles_batch
-            source_type = "kip" if key == "kip" else "vc"
-            parsed_articles = clean_titles_batch(parsed_articles, source_type)
+            parsed_articles = clean_titles_batch(parsed_articles, "vc")
 
             for art in parsed_articles:
                 if art["link"] in existing_links:
@@ -326,6 +338,7 @@ def run_news_crawl(test_mode: bool = False) -> str:
                     date=art["date"],
                     title=art["title"],
                     link=art["link"],
+                    nate_query=None,
                 )
                 session.add(article)
                 existing_links.add(art["link"])
@@ -336,6 +349,44 @@ def run_news_crawl(test_mode: bool = False) -> str:
 
             log(f"  · 신규 저장: +{site_added}건")
             total_new += site_added
+
+        # ── KIP (3 키워드 통합) ───────────────────────────
+        log(f"\n  소스: KIP News (네이트, 3 키워드)")
+        nate_articles = _crawl_nate_all()
+        log(f"  · 통합 파싱: {len(nate_articles)}건 (중복 제거 후)")
+
+        if nate_articles:
+            from .title_cleaner import clean_titles_batch
+            # title cleaner 는 title 만 다루므로 nate_query 보존 위해
+            # 원본을 그대로 두고 cleaned 만 매핑.
+            cleaned = clean_titles_batch(
+                [{"title": a["title"]} for a in nate_articles], "kip"
+            )
+            for i, cl in enumerate(cleaned):
+                nate_articles[i]["title"] = cl["title"]
+
+        site_added = 0
+        for art in nate_articles:
+            if art["link"] in existing_links:
+                continue
+
+            article = Article(
+                source="kip",
+                source_label="벤처뉴스",
+                date=art["date"],
+                title=art["title"],
+                link=art["link"],
+                nate_query=art.get("nate_query"),
+            )
+            session.add(article)
+            existing_links.add(art["link"])
+            site_added += 1
+
+            if test_mode and site_added >= 1:
+                break
+
+        log(f"  · 신규 저장: +{site_added}건")
+        total_new += site_added
 
         session.commit()
         log(f"\n총 신규 항목: {total_new}건 저장 완료")
@@ -353,7 +404,6 @@ def run_news_crawl(test_mode: bool = False) -> str:
 
 
 def get_new_articles_since(since: datetime.datetime) -> list[Article]:
-    """지정 시각 이후에 생성된 기사 목록 반환 (알림 트리거용)."""
     session = SessionLocal()
     try:
         articles = (
@@ -362,7 +412,6 @@ def get_new_articles_since(since: datetime.datetime) -> list[Article]:
             .order_by(Article.created_at.desc())
             .all()
         )
-        # detach from session
         session.expunge_all()
         return articles
     finally:

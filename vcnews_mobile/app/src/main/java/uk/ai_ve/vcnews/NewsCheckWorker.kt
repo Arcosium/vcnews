@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
+import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -80,6 +81,14 @@ class NewsCheckWorker(context: Context, params: WorkerParameters) : Worker(conte
     }
 
     private fun fetchNewArticles(sinceId: Long): JSONObject? {
+        // WebView 에서 로그인 후 저장된 세션 쿠키를 그대로 사용.
+        // 사용자가 아직 로그인 안 했으면 cookie 가 null/empty → 서버에서 401 → 알림 없음.
+        val sessionCookie = CookieManager.getInstance().getCookie(API_BASE)
+        if (sessionCookie.isNullOrBlank()) {
+            Log.i(TAG, "no session cookie; user not logged in yet")
+            return null
+        }
+
         val url = URL("$API_BASE$ENDPOINT?since_id=$sinceId&limit=20")
         val conn = url.openConnection() as HttpURLConnection
         return try {
@@ -88,7 +97,12 @@ class NewsCheckWorker(context: Context, params: WorkerParameters) : Worker(conte
             conn.requestMethod = "GET"
             conn.setRequestProperty("Accept", "application/json")
             conn.setRequestProperty("User-Agent", "VCNewsApp-Worker/1.0")
+            conn.setRequestProperty("Cookie", sessionCookie)
             val code = conn.responseCode
+            if (code == 401) {
+                Log.w(TAG, "API returned 401 — session expired")
+                return null
+            }
             if (code != 200) {
                 Log.w(TAG, "API returned $code")
                 return null

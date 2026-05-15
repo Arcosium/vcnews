@@ -4,15 +4,59 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>VC News — 벤처 뉴스 플랫폼</title>
-    <meta name="description" content="벤처협회공고, 한국투자파트너스 뉴스를 실시간으로 모아보는 VC 뉴스 플랫폼">
+    <meta name="description" content="벤처협회공고, 벤처뉴스를 실시간으로 모아보는 VC 뉴스 플랫폼">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=4">
+    <link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
-    <div id="app">
+    <!-- Auth Screen (login/signup) — 비인증 시 노출 -->
+    <div id="auth-screen" class="auth-screen hidden">
+        <div class="auth-card">
+            <div class="auth-logo">
+                <span class="material-icons-round logo-icon">trending_up</span>
+                <h1>VC News</h1>
+            </div>
+            <p class="auth-subtitle">벤처 뉴스를 한눈에</p>
+
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-mode="login">로그인</button>
+                <button class="auth-tab" data-mode="signup">회원가입</button>
+            </div>
+
+            <form id="auth-form" class="auth-form" autocomplete="on">
+                <label class="auth-label">
+                    <span>아이디</span>
+                    <input type="text" id="auth-username" name="username"
+                           autocomplete="username" required
+                           minlength="3" maxlength="64"
+                           placeholder="영문/숫자/_ , 3~64자">
+                </label>
+                <label class="auth-label">
+                    <span>비밀번호</span>
+                    <input type="password" id="auth-password" name="password"
+                           autocomplete="current-password" required
+                           minlength="4" maxlength="128"
+                           placeholder="4자 이상">
+                </label>
+                <label class="auth-remember">
+                    <input type="checkbox" id="auth-remember">
+                    <span class="auth-remember-box"></span>
+                    <span class="auth-remember-label">자동 로그인</span>
+                </label>
+                <div id="auth-error" class="auth-error hidden"></div>
+                <button type="submit" id="auth-submit" class="btn-primary auth-submit">
+                    <span class="material-icons-round">login</span>
+                    <span class="auth-submit-label">로그인</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main App (인증 후 노출) -->
+    <div id="app" class="hidden">
         <!-- Header -->
         <header id="app-header">
             <div class="header-content">
@@ -21,9 +65,15 @@
                     <h1>VC News</h1>
                 </div>
 
-                <button id="btn-refresh" class="header-btn" title="수동 크롤링">
-                    <span class="material-icons-round">refresh</span>
-                </button>
+                <div class="header-actions">
+                    <button id="btn-refresh" class="header-btn hidden" title="수동 크롤링 (관리자)">
+                        <span class="material-icons-round">refresh</span>
+                    </button>
+                    <button id="btn-user" class="header-btn header-user" title="계정">
+                        <span class="material-icons-round">account_circle</span>
+                        <span id="user-label" class="user-label"></span>
+                    </button>
+                </div>
             </div>
         </header>
 
@@ -40,7 +90,6 @@
 
         <!-- Main Content -->
         <main id="main-content">
-            <!-- Articles List -->
             <div id="articles-container">
                 <div id="articles-list" class="articles-list"></div>
                 <div id="loading-indicator" class="loading hidden">
@@ -55,10 +104,11 @@
 
             <!-- Settings Panel -->
             <div id="settings-panel" class="settings-panel hidden">
-                <div class="settings-section">
+                <!-- 크롤링 주기: admin 만 노출 -->
+                <div class="settings-section admin-only hidden" id="settings-crawl-interval">
                     <h2 class="settings-title">
                         <span class="material-icons-round">schedule</span>
-                        크롤링 주기
+                        크롤링 주기 <span class="admin-badge">관리자</span>
                     </h2>
                     <div class="setting-row">
                         <label for="crawl-interval">자동 수집 간격</label>
@@ -93,7 +143,7 @@
                             </label>
                         </div>
                         <div class="setting-row">
-                            <label for="toggle-kip">KIP News 알림</label>
+                            <label for="toggle-kip">벤처뉴스 알림</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" id="toggle-kip" checked>
                                 <span class="toggle-slider"></span>
@@ -120,9 +170,9 @@
                 <div class="settings-section">
                     <h2 class="settings-title">
                         <span class="material-icons-round">newspaper</span>
-                        KIP News 알림 키워드
+                        벤처뉴스 알림 키워드
                     </h2>
-                    <p class="settings-desc">등록한 키워드가 포함된 KIP News만 알림을 받습니다. 비어 있으면 모든 신규 KIP News에 알림.</p>
+                    <p class="settings-desc">등록한 키워드가 포함된 벤처뉴스만 알림을 받습니다. 비어 있으면 모든 신규 벤처뉴스에 알림.</p>
                     <div class="keyword-input-row">
                         <input type="text" id="keyword-input-kip" placeholder="키워드 입력" class="keyword-input" data-source="kip_news">
                         <button id="btn-add-keyword-kip" class="btn-add-keyword" data-source="kip_news">
@@ -138,6 +188,13 @@
                         설정 저장
                     </button>
                 </div>
+
+                <div class="settings-section">
+                    <button id="btn-logout" class="btn-secondary">
+                        <span class="material-icons-round">logout</span>
+                        로그아웃
+                    </button>
+                </div>
             </div>
         </main>
 
@@ -149,7 +206,7 @@
             </button>
             <button class="nav-item" data-tab="kip_news" id="nav-kip">
                 <span class="material-icons-round nav-icon">newspaper</span>
-                <span class="nav-label">KIP News</span>
+                <span class="nav-label">벤처뉴스</span>
             </button>
             <button class="nav-item" data-tab="scraps" id="nav-scraps">
                 <span class="material-icons-round nav-icon">star</span>
@@ -161,10 +218,10 @@
             </button>
         </nav>
 
-        <!-- Toast Notification -->
+        <!-- Toast -->
         <div id="toast" class="toast hidden"></div>
     </div>
 
-    <script src="/static/app.js?v=4"></script>
+    <script src="/static/app.js?v=6"></script>
 </body>
 </html>
