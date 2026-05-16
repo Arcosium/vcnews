@@ -1,22 +1,37 @@
 # 보안
 .env
 .env.*
+!.env.example
 *.pem
 *.key
+*.crt
 secrets.*
+.jwt_secret
+.fernet.key
+*_token.json
+*_secret.json
 Password
 password
 
 # 로그/임시
 *.log
+logs/
 nohup.out
 *.swp
 *.swo
+*.tmp
 
-# DB
+# DB / SQLite WAL
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
+
+# 사용자 데이터
+chat_logs/
+user_data/
+profiles/
 
 # Python
 __pycache__/
