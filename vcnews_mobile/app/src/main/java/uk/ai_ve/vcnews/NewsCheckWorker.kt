@@ -62,21 +62,71 @@ class NewsCheckWorker(context: Context, params: WorkerParameters) : Worker(conte
 
             createChannelIfNeeded()
 
-            // 응답은 id DESC — 가장 새로운 것부터. 표시 한도는 NOTIF_LIMIT.
+            // 응답은 id DESC — 가장 새로운 것부터.
+            //  • 알림: 백로그 폭주 방지를 위해 상위 NOTIF_LIMIT 건만 표시.
+            //  • 자동 스크랩: 알림 한도와 무관하게 가져온 신규 기사 전체 보관.
+            //    (베이스라인이 batch 최댓값으로 점프하므로, 알림에서 잘린
+            //     6번째 이하 기사도 스크랩해 두지 않으면 영영 유실됨.)
             val toShow = minOf(articles.length(), NOTIF_LIMIT)
-            var maxShownId = lastSeen
-            for (i in 0 until toShow) {
+            var maxSeenId = lastSeen
+            for (i in 0 until articles.length()) {
                 val a = articles.getJSONObject(i)
-                showNotification(a)
                 val id = a.optLong("id", 0L)
-                if (id > maxShownId) maxShownId = id
+
+                if (i < toShow) showNotification(a)
+
+                // 자동 스크랩 — best-effort. 세션 만료/네트워크 오류로
+                // 실패해도 로그만 남기고 계속한다 (알림은 이미 표시됨,
+                // 워커를 재시도시켜 중복 알림을 내지 않는다).
+                if (id > 0L && !ensureScrapped(id)) {
+                    Log.w(TAG, "auto-scrap skipped for article $id (scrap call failed)")
+                }
+
+                if (id > maxSeenId) maxSeenId = id
             }
-            prefs.edit().putLong(KEY_LAST_SEEN_ID, maxShownId).apply()
+            prefs.edit().putLong(KEY_LAST_SEEN_ID, maxSeenId).apply()
 
             Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "Worker failed", e)
             Result.retry()
+        }
+    }
+
+    /**
+     * 멱등 스크랩 엔드포인트 호출 — 기사를 사용자 스크랩함에 보관한다.
+     *
+     * 서버의 `POST /api/scraps/{id}/ensure` 는 toggle 이 아니라 add-only 라서
+     * 같은 기사에 여러 번 호출해도 안전하다 (워커 재시도 대비).
+     *
+     * @return 보관 성공(또는 이미 보관됨)이면 true, 인증/네트워크 실패면 false.
+     */
+    private fun ensureScrapped(articleId: Long): Boolean {
+        val sessionCookie = CookieManager.getInstance().getCookie(API_BASE)
+        if (sessionCookie.isNullOrBlank()) return false
+
+        val url = URL("$API_BASE/api/scraps/$articleId/ensure")
+        val conn = url.openConnection() as HttpURLConnection
+        return try {
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("User-Agent", "VCNewsApp-Worker/1.0")
+            conn.setRequestProperty("Cookie", sessionCookie)
+            conn.setFixedLengthStreamingMode(0)   // 빈 본문 POST
+            val code = conn.responseCode
+            if (code != 200) {
+                Log.w(TAG, "ensureScrapped($articleId) returned $code")
+                false
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "ensureScrapped($articleId) failed: ${e.message}")
+            false
+        } finally {
+            conn.disconnect()
         }
     }
 

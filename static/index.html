@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=6">
+    <link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
     <!-- Auth Screen (login/signup) — 비인증 시 노출 -->
@@ -69,10 +69,19 @@
                     <button id="btn-refresh" class="header-btn hidden" title="수동 크롤링 (관리자)">
                         <span class="material-icons-round">refresh</span>
                     </button>
-                    <button id="btn-user" class="header-btn header-user" title="계정">
-                        <span class="material-icons-round">account_circle</span>
-                        <span id="user-label" class="user-label"></span>
-                    </button>
+                    <div class="user-menu-wrap">
+                        <button id="btn-user" class="header-btn header-user" title="계정"
+                                aria-haspopup="true" aria-expanded="false">
+                            <span class="material-icons-round">account_circle</span>
+                            <span id="user-label" class="user-label"></span>
+                        </button>
+                        <div id="user-menu" class="user-menu hidden" role="menu">
+                            <button id="btn-logout-menu" class="user-menu-item" role="menuitem">
+                                <span class="material-icons-round">logout</span>
+                                <span>로그아웃</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </header>
@@ -222,6 +231,6 @@
         <div id="toast" class="toast hidden"></div>
     </div>
 
-    <script src="/static/app.js?v=6"></script>
+    <script src="/static/app.js?v=7"></script>
 </body>
 </html>

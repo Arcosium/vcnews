@@ -1098,6 +1098,56 @@ body {
     .header-user { padding: 0; width: 40px; }
 }
 
+/* 계정 드롭다운 — 우상단 사람 아이콘 클릭 시 노출 */
+.user-menu-wrap {
+    position: relative;
+}
+
+.user-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 160px;
+    padding: 6px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    z-index: 200;
+    transform-origin: top right;
+    animation: menu-pop var(--transition-normal) ease;
+}
+
+@keyframes menu-pop {
+    from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.user-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: var(--radius-sm, 8px);
+    cursor: pointer;
+    transition: all var(--transition-normal);
+}
+
+.user-menu-item:hover {
+    background: rgba(248, 113, 113, 0.12);
+    color: var(--danger);
+}
+
+.user-menu-item .material-icons-round {
+    font-size: 18px;
+}
+
 /* Admin badge + button-secondary */
 .admin-badge {
     display: inline-block;

@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, desc, func, or_
+from sqlalchemy.exc import IntegrityError
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -471,6 +472,39 @@ def toggle_scrap(article_id: int, user: User = Depends(get_current_user)):
             session.add(Scrap(user_id=user.id, article_id=article_id))
             session.commit()
             return {"scrapped": True, "message": "스크랩 완료"}
+    finally:
+        session.close()
+
+
+@app.post("/api/scraps/{article_id}/ensure")
+def ensure_scrap(article_id: int, user: User = Depends(get_current_user)):
+    """멱등 스크랩 — 항상 '스크랩됨' 상태로 만든다 (절대 해제하지 않음).
+
+    푸시 알림 워커가 알림으로 표시한 기사를 자동 보관할 때 사용.
+    toggle_scrap 과 달리 이미 스크랩된 글에 다시 호출해도 그대로 유지되므로,
+    워커가 재시도(Result.retry)되어 같은 기사를 두 번 처리해도 안전하다.
+    """
+    session = SessionLocal()
+    try:
+        article = session.query(Article).get(article_id)
+        if not article:
+            raise HTTPException(404, "기사를 찾을 수 없습니다")
+
+        existing = session.query(Scrap).filter(
+            Scrap.user_id == user.id,
+            Scrap.article_id == article_id,
+        ).first()
+        if existing:
+            return {"scrapped": True, "message": "이미 스크랩됨"}
+
+        session.add(Scrap(user_id=user.id, article_id=article_id))
+        try:
+            session.commit()
+        except IntegrityError:
+            # (user_id, article_id) 유니크 제약 — 동시 호출 경합 시 이미 들어간 것.
+            session.rollback()
+            return {"scrapped": True, "message": "이미 스크랩됨"}
+        return {"scrapped": True, "message": "스크랩 완료"}
     finally:
         session.close()
 

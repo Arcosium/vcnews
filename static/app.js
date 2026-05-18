@@ -49,6 +49,8 @@
         searchClear: $('#search-clear'),
         btnRefresh: $('#btn-refresh'),
         btnUser: $('#btn-user'),
+        userMenu: $('#user-menu'),
+        btnLogoutMenu: $('#btn-logout-menu'),
         userLabel: $('#user-label'),
         btnLogout: $('#btn-logout'),
         toast: $('#toast'),
@@ -183,6 +185,7 @@
     // ─── Auth UI ─────────────────────────────────────────
 
     function showAuthScreen() {
+        closeUserMenu();
         dom.authScreen.classList.remove('hidden');
         dom.app.classList.add('hidden');
         setAuthMode('login');
@@ -251,9 +254,24 @@
     }
 
     async function handleLogout() {
+        closeUserMenu();
         try { await API.logout(); } catch (_) { /* ignore */ }
         state.user = null;
         showAuthScreen();
+    }
+
+    // ─── 계정 드롭다운 ───────────────────────────────────
+
+    function openUserMenu() {
+        dom.userMenu.classList.remove('hidden');
+        dom.btnUser.setAttribute('aria-expanded', 'true');
+    }
+    function closeUserMenu() {
+        dom.userMenu.classList.add('hidden');
+        dom.btnUser.setAttribute('aria-expanded', 'false');
+    }
+    function toggleUserMenu() {
+        dom.userMenu.classList.contains('hidden') ? openUserMenu() : closeUserMenu();
     }
 
     // ─── Articles render (DOM API, no innerHTML) ─────────
@@ -491,6 +509,23 @@
         dom.authForm.addEventListener('submit', handleAuthSubmit);
 
         if (dom.btnLogout) dom.btnLogout.addEventListener('click', handleLogout);
+
+        // 우상단 사람 아이콘 → 로그아웃 드롭다운 토글
+        dom.btnUser.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleUserMenu();
+        });
+        dom.btnLogoutMenu.addEventListener('click', handleLogout);
+        // 메뉴 바깥 클릭 / ESC 로 닫기
+        document.addEventListener('click', (e) => {
+            if (!dom.userMenu.classList.contains('hidden') &&
+                !e.target.closest('.user-menu-wrap')) {
+                closeUserMenu();
+            }
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeUserMenu();
+        });
 
         $$('.nav-item').forEach((btn) => {
             btn.addEventListener('click', () => switchTab(btn.dataset.tab));
