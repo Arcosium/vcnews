@@ -408,6 +408,26 @@
 
     // ─── Data load ───────────────────────────────────────
 
+    // 현재 탭/검색/페이지에 맞는 목록 한 페이지를 가져온다.
+    // (loadArticles 와 loadMoreArticles 가 공유하던 scraps↔articles 분기)
+    function fetchPage(tab, signal) {
+        return tab === 'scraps'
+            ? API.getScraps(state.searchQuery, state.currentPage, state.pageSize, signal)
+            : API.getArticles(tab, state.searchQuery, state.currentPage, state.pageSize, signal);
+    }
+
+    // API 실패가 세션 만료 때문인지 확인. 맞으면 로그인 화면으로 보내고 true.
+    // (loadArticles / loadSettings 가 공유하던 401 처리)
+    async function isSessionExpired() {
+        const me = await API.me().catch(() => null);
+        if (!me) {
+            state.user = null;
+            showAuthScreen();
+            return true;
+        }
+        return false;
+    }
+
     async function loadArticles() {
         if (state.currentAbort) state.currentAbort.abort();
         const controller = new AbortController();
@@ -417,12 +437,7 @@
         showLoading();
 
         try {
-            let data;
-            if (requestedTab === 'scraps') {
-                data = await API.getScraps(state.searchQuery, state.currentPage, state.pageSize, controller.signal);
-            } else {
-                data = await API.getArticles(requestedTab, state.searchQuery, state.currentPage, state.pageSize, controller.signal);
-            }
+            const data = await fetchPage(requestedTab, controller.signal);
             if (controller.signal.aborted || state.currentTab !== requestedTab) return;
 
             state.articles = data.articles;
@@ -430,8 +445,7 @@
             renderArticles(state.articles);
         } catch (err) {
             if (err.name === 'AbortError') return;
-            const me = await API.me().catch(() => null);
-            if (!me) { state.user = null; showAuthScreen(); return; }
+            if (await isSessionExpired()) return;
             showToast('데이터 로드 실패', 'error');
             console.error(err);
             if (state.currentTab === requestedTab) showEmptyState();
@@ -458,8 +472,7 @@
             renderKeywords('vc_notices', dom.keywordsListVc, kw.vc_notices || []);
             renderKeywords('kip_news', dom.keywordsListKip, kw.kip_news || []);
         } catch (err) {
-            const me = await API.me().catch(() => null);
-            if (!me) { state.user = null; showAuthScreen(); return; }
+            if (await isSessionExpired()) return;
             showToast('설정 로드 실패', 'error');
             console.error(err);
         }
@@ -629,12 +642,7 @@
         const requestedTab = state.currentTab;
 
         try {
-            let data;
-            if (requestedTab === 'scraps') {
-                data = await API.getScraps(state.searchQuery, state.currentPage, state.pageSize, controller.signal);
-            } else {
-                data = await API.getArticles(requestedTab, state.searchQuery, state.currentPage, state.pageSize, controller.signal);
-            }
+            const data = await fetchPage(requestedTab, controller.signal);
             if (controller.signal.aborted || state.currentTab !== requestedTab) return;
             if (data.articles.length > 0) {
                 state.articles.push(...data.articles);

@@ -101,6 +101,13 @@ class Settings(Base):
 # 알림 키워드 소스 ID
 NOTIFICATION_SOURCES = ("vc_notices", "kip_news")
 
+# 탭 → article.source 키 매핑 (get_articles / get_new_articles 공용).
+# 한 곳에서만 정의해 두 엔드포인트의 매핑이 어긋나지 않게 한다.
+SOURCE_KEYS_BY_TAB = {
+    "vc_notices": ["kvca", "kvic"],
+    "kip_news": ["kip"],
+}
+
 
 class NotificationKeyword(Base):
     """유저별 알림 키워드 — (user_id, source, keyword) 유니크."""

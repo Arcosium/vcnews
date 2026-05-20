@@ -8,7 +8,6 @@ OpenRouter API (openrouter/free 모델)를 사용하여:
 from __future__ import annotations
 
 import os
-import json
 import logging
 import re
 from typing import Optional
@@ -275,8 +274,6 @@ def clean_titles_batch(articles: list[dict], source_type: str) -> list[dict]:
                 if cleaned and i < len(articles):
                     articles[i]["title"] = cleaned
 
-    except json.JSONDecodeError as e:
-        logger.warning(f"AI 응답 JSON 파싱 실패: {e}. 원본 제목 유지.")
     except Exception as e:
         logger.warning(f"제목 정제 API 오류: {e}. 원본 제목 유지.")
 

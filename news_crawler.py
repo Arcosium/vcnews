@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 from urllib.parse import urljoin, quote
 from typing import Optional
@@ -23,11 +24,20 @@ import requests
 import urllib3
 from bs4 import BeautifulSoup
 
-from .models import SessionLocal, Article, init_db
+from .models import KST, SessionLocal, Article, init_db
+from .title_cleaner import clean_titles_batch
 
 urllib3.disable_warnings()
 
-KST = datetime.timezone(datetime.timedelta(hours=9))
+logger = logging.getLogger("vcnews.crawler")
+
+# 게시판 셀에서 날짜를 뽑는 정규식 — 여러 파서가 공유.
+_DATE_RE = re.compile(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b")
+
+
+def _today_kst() -> str:
+    """날짜를 못 찾았을 때 쓰는 KST 기준 오늘 (YYYY-MM-DD)."""
+    return datetime.datetime.now(KST).strftime("%Y-%m-%d")
 
 # ─── 크롤링 대상 소스 정의 ─────────────────────────────────────
 
@@ -66,18 +76,33 @@ def _fetch_page(url: str) -> Optional[BeautifulSoup]:
         )
         r.raise_for_status()
         return BeautifulSoup(r.text, "html.parser")
-    except Exception:
+    except Exception as e:
+        # 호출부는 'None' 만 보고 원인을 잃으므로 여기서 한 줄 남긴다.
+        logger.warning(f"페이지 로드 실패 {url}: {e}")
         return None
 
 
-def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
+def _parse_table_rows(
+    soup: BeautifulSoup,
+    site_url: str,
+    *,
+    handle_js: bool = True,
+    js_fallback_note: bool = False,
+) -> list[dict]:
+    """`<table><tr>` 기반 게시판 파싱 — kvca/kvic/네이트 테이블 폴백 공용.
+
+    - handle_js=True  : href 가 `javascript:…` 면 숫자 id 를 뽑아 `?id=` 링크 생성.
+        · js_fallback_note=True  → 숫자가 없으면 '(직접 방문 필요)' 표식 링크(kvca).
+        · js_fallback_note=False → 그런 행은 링크 없음 처리로 건너뜀(kvic).
+    - handle_js=False : `javascript:` 구분 없이 항상 urljoin (네이트 테이블 폴백).
+    """
     articles = []
     for tr in soup.find_all("tr"):
         tds = tr.find_all(["td", "th"])
         if not tds or len(tds) < 2:
             continue
 
-        row_texts = []
+        row_texts: list[str] = []
         link = ""
         date_str = ""
 
@@ -89,16 +114,16 @@ def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
             a_tag = td.find("a")
             if a_tag and a_tag.get("href") and not a_tag["href"].startswith("#"):
                 href = a_tag["href"]
-                if href.startswith("javascript:"):
+                if handle_js and href.startswith("javascript:"):
                     js_num = re.search(r"\d+", href)
                     if js_num:
                         link = site_url + "?id=" + js_num.group()
-                    else:
+                    elif js_fallback_note:
                         link = site_url + " (직접 방문 필요)"
                 else:
                     link = urljoin(site_url, href)
 
-            date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text_)
+            date_match = _DATE_RE.search(text_)
             if not date_str and date_match and len(text_) <= 12:
                 date_str = date_match.group()
 
@@ -107,52 +132,19 @@ def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
 
         title = " | ".join(row_texts)
         if not date_str:
-            date_str = datetime.datetime.now(KST).strftime("%Y-%m-%d")
+            date_str = _today_kst()
 
         articles.append({"date": date_str, "title": title, "link": link})
 
     return articles
 
 
+def _parse_kvca(soup: BeautifulSoup, site_url: str) -> list[dict]:
+    return _parse_table_rows(soup, site_url, js_fallback_note=True)
+
+
 def _parse_kvic(soup: BeautifulSoup, site_url: str) -> list[dict]:
-    articles = []
-
-    for tr in soup.find_all("tr"):
-        tds = tr.find_all(["td", "th"])
-        if not tds or len(tds) < 2:
-            continue
-
-        row_texts = []
-        link = ""
-        date_str = ""
-
-        for td in tds:
-            text_ = td.get_text(strip=True)
-            if text_:
-                row_texts.append(text_)
-
-            a_tag = td.find("a")
-            if a_tag and a_tag.get("href") and not a_tag["href"].startswith("#"):
-                href = a_tag["href"]
-                if href.startswith("javascript:"):
-                    js_num = re.search(r"\d+", href)
-                    if js_num:
-                        link = site_url + "?id=" + js_num.group()
-                else:
-                    link = urljoin(site_url, href)
-
-            date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text_)
-            if not date_str and date_match and len(text_) <= 12:
-                date_str = date_match.group()
-
-        if not link:
-            continue
-
-        title = " | ".join(row_texts)
-        if not date_str:
-            date_str = datetime.datetime.now(KST).strftime("%Y-%m-%d")
-
-        articles.append({"date": date_str, "title": title, "link": link})
+    articles = _parse_table_rows(soup, site_url, js_fallback_note=False)
 
     for li in soup.select("ul.board-list li, .list-wrap li, .bbs-list li"):
         a_tag = li.find("a")
@@ -166,11 +158,11 @@ def _parse_kvic(soup: BeautifulSoup, site_url: str) -> list[dict]:
         date_el = li.find(class_=re.compile(r"date|time|day"))
         date_str = ""
         if date_el:
-            date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", date_el.get_text())
+            date_match = _DATE_RE.search(date_el.get_text())
             if date_match:
                 date_str = date_match.group()
         if not date_str:
-            date_str = datetime.datetime.now(KST).strftime("%Y-%m-%d")
+            date_str = _today_kst()
 
         if title and link:
             articles.append({"date": date_str, "title": title, "link": link})
@@ -185,28 +177,9 @@ def _parse_nate_news(soup: BeautifulSoup, site_url: str, query: str) -> list[dic
     news_items = soup.select("div.news_list dl, ul.resultList li, div.newslist li, .news_cont")
 
     if not news_items:
-        for tr in soup.find_all("tr"):
-            tds = tr.find_all(["td", "th"])
-            if not tds or len(tds) < 2:
-                continue
-            row_texts = []
-            link = ""
-            date_str = ""
-            for td in tds:
-                text_ = td.get_text(strip=True)
-                if text_:
-                    row_texts.append(text_)
-                a_tag = td.find("a")
-                if a_tag and a_tag.get("href") and not a_tag["href"].startswith("#"):
-                    link = urljoin(site_url, a_tag["href"])
-                date_match = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", text_)
-                if not date_str and date_match and len(text_) <= 12:
-                    date_str = date_match.group()
-            if link:
-                title = " | ".join(row_texts)
-                if not date_str:
-                    date_str = datetime.datetime.now(KST).strftime("%Y-%m-%d")
-                articles.append({"date": date_str, "title": title, "link": link})
+        articles.extend(
+            _parse_table_rows(soup, site_url, handle_js=False)
+        )
     else:
         for item in news_items:
             a_tag = item.find("a")
@@ -221,16 +194,15 @@ def _parse_nate_news(soup: BeautifulSoup, site_url: str, query: str) -> list[dic
             date_str = ""
             date_el = item.find(class_=re.compile(r"date|time|day|info"))
             if date_el:
-                dm = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", date_el.get_text())
+                dm = _DATE_RE.search(date_el.get_text())
                 if dm:
                     date_str = dm.group()
             if not date_str:
-                full_text = item.get_text()
-                dm = re.search(r"\b20\d{2}[-./]\d{2}[-./]\d{2}\b", full_text)
+                dm = _DATE_RE.search(item.get_text())
                 if dm:
                     date_str = dm.group()
             if not date_str:
-                date_str = datetime.datetime.now(KST).strftime("%Y-%m-%d")
+                date_str = _today_kst()
 
             if title:
                 articles.append({"date": date_str, "title": title, "link": link})
@@ -245,7 +217,7 @@ def _parse_nate_news(soup: BeautifulSoup, site_url: str, query: str) -> list[dic
             if query in text_:
                 link = href if href.startswith("http") else urljoin(site_url, href)
                 articles.append({
-                    "date": datetime.datetime.now(KST).strftime("%Y-%m-%d"),
+                    "date": _today_kst(),
                     "title": text_,
                     "link": link,
                 })
@@ -325,7 +297,6 @@ def run_news_crawl(test_mode: bool = False) -> str:
             parsed_articles = parser(soup, url)
             log(f"  · 파싱된 항목: {len(parsed_articles)}건")
 
-            from .title_cleaner import clean_titles_batch
             parsed_articles = clean_titles_batch(parsed_articles, "vc")
 
             for art in parsed_articles:
@@ -356,7 +327,6 @@ def run_news_crawl(test_mode: bool = False) -> str:
         log(f"  · 통합 파싱: {len(nate_articles)}건 (중복 제거 후)")
 
         if nate_articles:
-            from .title_cleaner import clean_titles_batch
             # title cleaner 는 title 만 다루므로 nate_query 보존 위해
             # 원본을 그대로 두고 cleaned 만 매핑.
             cleaned = clean_titles_batch(

@@ -85,7 +85,7 @@ JWT_EXPIRE_DAYS = 30
 
 
 def issue_token(user_id: int, username: str) -> str:
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         "sub": str(user_id),
         "username": username,
@@ -119,7 +119,7 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="유효하지 않은 세션")
     session = SessionLocal()
     try:
-        user = session.query(User).get(user_id)
+        user = session.get(User, user_id)
         if not user:
             raise HTTPException(status_code=401, detail="유저를 찾을 수 없습니다")
         # detached: 세션 닫히기 전에 필요한 필드 access 해두기
@@ -128,17 +128,6 @@ def get_current_user(
         return user
     finally:
         session.close()
-
-
-def get_optional_user(
-    vcnews_session: Optional[str] = Cookie(default=None, alias=JWT_COOKIE_NAME),
-) -> Optional[User]:
-    if not vcnews_session:
-        return None
-    try:
-        return get_current_user(vcnews_session)
-    except HTTPException:
-        return None
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:

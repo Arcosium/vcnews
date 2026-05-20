@@ -94,6 +94,43 @@ class NewsCheckWorker(context: Context, params: WorkerParameters) : Worker(conte
     }
 
     /**
+     * 세션 쿠키를 실어 공용 헤더/타임아웃으로 연결을 열고 [block] 을 실행한다.
+     *
+     * WebView 에서 로그인 후 저장된 세션 쿠키를 그대로 사용한다. 쿠키가
+     * 없으면(미로그인) 호출하지 않고 null. 예외/타임아웃도 로그 후 null.
+     * 이 한 곳이 fetchNewArticles/ensureScrapped 의 연결 보일러플레이트를 모은다.
+     */
+    private fun <T> withSession(
+        path: String,
+        method: String,
+        zeroLengthBody: Boolean = false,
+        block: (HttpURLConnection) -> T,
+    ): T? {
+        val sessionCookie = CookieManager.getInstance().getCookie(API_BASE)
+        if (sessionCookie.isNullOrBlank()) {
+            Log.i(TAG, "no session cookie; user not logged in yet")
+            return null
+        }
+
+        val conn = URL("$API_BASE$path").openConnection() as HttpURLConnection
+        return try {
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
+            conn.requestMethod = method
+            conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("User-Agent", "VCNewsApp-Worker/1.0")
+            conn.setRequestProperty("Cookie", sessionCookie)
+            if (zeroLengthBody) conn.setFixedLengthStreamingMode(0)
+            block(conn)
+        } catch (e: Exception) {
+            Log.w(TAG, "$method $path failed: ${e.message}")
+            null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /**
      * 멱등 스크랩 엔드포인트 호출 — 기사를 사용자 스크랩함에 보관한다.
      *
      * 서버의 `POST /api/scraps/{id}/ensure` 는 toggle 이 아니라 add-only 라서
@@ -102,19 +139,7 @@ class NewsCheckWorker(context: Context, params: WorkerParameters) : Worker(conte
      * @return 보관 성공(또는 이미 보관됨)이면 true, 인증/네트워크 실패면 false.
      */
     private fun ensureScrapped(articleId: Long): Boolean {
-        val sessionCookie = CookieManager.getInstance().getCookie(API_BASE)
-        if (sessionCookie.isNullOrBlank()) return false
-
-        val url = URL("$API_BASE/api/scraps/$articleId/ensure")
-        val conn = url.openConnection() as HttpURLConnection
-        return try {
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 10_000
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Accept", "application/json")
-            conn.setRequestProperty("User-Agent", "VCNewsApp-Worker/1.0")
-            conn.setRequestProperty("Cookie", sessionCookie)
-            conn.setFixedLengthStreamingMode(0)   // 빈 본문 POST
+        val ok = withSession("/api/scraps/$articleId/ensure", "POST", zeroLengthBody = true) { conn ->
             val code = conn.responseCode
             if (code != 200) {
                 Log.w(TAG, "ensureScrapped($articleId) returned $code")
@@ -122,50 +147,24 @@ class NewsCheckWorker(context: Context, params: WorkerParameters) : Worker(conte
             } else {
                 true
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "ensureScrapped($articleId) failed: ${e.message}")
-            false
-        } finally {
-            conn.disconnect()
         }
+        return ok == true
     }
 
-    private fun fetchNewArticles(sinceId: Long): JSONObject? {
-        // WebView 에서 로그인 후 저장된 세션 쿠키를 그대로 사용.
-        // 사용자가 아직 로그인 안 했으면 cookie 가 null/empty → 서버에서 401 → 알림 없음.
-        val sessionCookie = CookieManager.getInstance().getCookie(API_BASE)
-        if (sessionCookie.isNullOrBlank()) {
-            Log.i(TAG, "no session cookie; user not logged in yet")
-            return null
-        }
-
-        val url = URL("$API_BASE$ENDPOINT?since_id=$sinceId&limit=20")
-        val conn = url.openConnection() as HttpURLConnection
-        return try {
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 10_000
-            conn.requestMethod = "GET"
-            conn.setRequestProperty("Accept", "application/json")
-            conn.setRequestProperty("User-Agent", "VCNewsApp-Worker/1.0")
-            conn.setRequestProperty("Cookie", sessionCookie)
-            val code = conn.responseCode
-            if (code == 401) {
-                Log.w(TAG, "API returned 401 — session expired")
-                return null
+    private fun fetchNewArticles(sinceId: Long): JSONObject? =
+        withSession("$ENDPOINT?since_id=$sinceId&limit=20", "GET") { conn ->
+            when (val code = conn.responseCode) {
+                200 -> JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+                401 -> {
+                    Log.w(TAG, "API returned 401 — session expired")
+                    null
+                }
+                else -> {
+                    Log.w(TAG, "API returned $code")
+                    null
+                }
             }
-            if (code != 200) {
-                Log.w(TAG, "API returned $code")
-                return null
-            }
-            val text = conn.inputStream.bufferedReader().use { it.readText() }
-            JSONObject(text)
-        } catch (e: Exception) {
-            Log.w(TAG, "fetchNewArticles failed: ${e.message}")
-            null
-        } finally {
-            conn.disconnect()
         }
-    }
 
     private fun createChannelIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
