@@ -1,0 +1,26 @@
+# systemd 유닛 — sudo cp 로 /etc/systemd/system/vcnews.service 설치 후 enable --now.
+# vcnews.ai-ve.uk (Cloudflare hyfe-iqc 터널) -> 127.0.0.1:8585 로 프록시됨.
+# .env(OPENROUTER_API_KEY)는 title_cleaner.py 가 절대경로로 직접 load_dotenv 하므로
+# systemd EnvironmentFile 불필요(/home 의 EnvironmentFile 은 SELinux 가 막음).
+[Unit]
+Description=VC News Platform (vcnews.ai-ve.uk)
+After=network-online.target
+Wants=network-online.target
+# 재시작 횟수 제한 해제: 빠른 크래시-루프(기본 10초 내 5회)에 systemd 가
+# 영구 포기하면 502 가 고착된다. 죽으면 무조건 다시 띄운다.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+# 모듈 경로가 VC_Crawling.app:app 이므로 부모 디렉터리에서 기동한다.
+WorkingDirectory=/home/opc/projects
+# /home 아래 바이너리는 SELinux 가 systemd 실행을 막으므로(203/EXEC),
+# /usr/bin/python3.11 -m uvicorn 으로 기동한다(ArQuant 와 동일 패턴).
+ExecStart=/usr/bin/python3.11 -m uvicorn VC_Crawling.app:app --host 0.0.0.0 --port 8585 --log-level info
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
