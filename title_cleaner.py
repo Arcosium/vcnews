@@ -16,7 +16,8 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(_THIS_DIR, ".env"))
+# 통합 .env (전 프로젝트 공용). 키 회전은 /home/opc/projects/.env 한 곳에서.
+load_dotenv("/home/opc/projects/.env")
 
 logger = logging.getLogger("vcnews.title_cleaner")
 
