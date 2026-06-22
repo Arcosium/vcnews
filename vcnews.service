@@ -1,7 +1,7 @@
 # systemd 유닛 — sudo cp 로 /etc/systemd/system/vcnews.service 설치 후 enable --now.
 # vcnews.ai-ve.uk (Cloudflare hyfe-iqc 터널) -> 127.0.0.1:8585 로 프록시됨.
-# .env(OPENROUTER_API_KEY)는 title_cleaner.py 가 절대경로로 직접 load_dotenv 하므로
-# systemd EnvironmentFile 불필요(/home 의 EnvironmentFile 은 SELinux 가 막음).
+# 제목 정제는 외부 API 키 없이 localhost의 OpenAI 호환 LLM 서버를 사용한다.
+# 필요 시 LOCAL_LLM_BASE_URL / LOCAL_LLM_MODEL을 Service Environment=로 설정한다.
 [Unit]
 Description=VC News Platform (vcnews.ai-ve.uk)
 After=network-online.target

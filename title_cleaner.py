@@ -1,6 +1,6 @@
 """AI 기반 뉴스 제목 정제 모듈.
 
-OpenRouter API (openrouter/free 모델)를 사용하여:
+로컬 OpenAI 호환 LLM 서버를 사용하여:
 - VC 공고: 번호, 기관명, 날짜 등 군더더기를 제거하고 순수 '제목'만 추출
 - KIP News: 뒤에 붙은 본문 요약/매체명/시간을 제거하고 순수 '헤드라인'만 추출
 """
@@ -13,15 +13,17 @@ import re
 from typing import Optional
 
 from openai import OpenAI
-from dotenv import load_dotenv
-
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-# 통합 .env (전 프로젝트 공용). 키 회전은 /home/opc/projects/.env 한 곳에서.
-load_dotenv("/home/opc/projects/.env")
-
 logger = logging.getLogger("vcnews.title_cleaner")
 
-# ─── OpenRouter 클라이언트 ─────────────────────────────────
+# ─── 로컬 OpenAI 호환 클라이언트 ─────────────────────────────
+#
+# llama.cpp, vLLM, Ollama(OpenAI compatibility mode) 등 OpenAI 호환
+# /v1/chat/completions 엔드포인트를 사용한다. 이 프로그램은 어떤 외부 API 키도
+# 읽거나 전송하지 않는다. OpenAI SDK는 api_key 인자를 요구하므로 로컬 서버에
+# 전달해도 비밀값이 아닌 고정 더미 문자열만 사용한다.
+
+_LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+_LOCAL_LLM_API_KEY = "local"
 
 _client: Optional[OpenAI] = None
 
@@ -29,19 +31,19 @@ _client: Optional[OpenAI] = None
 def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        api_key = os.getenv("OPENROUTER_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY가 .env에 설정되지 않았습니다")
         _client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
+            base_url=_LOCAL_LLM_BASE_URL,
+            api_key=_LOCAL_LLM_API_KEY,
         )
     return _client
 
 
-# 모델 — 기본값은 기존과 동일. 더 강한 무료 모델로 바꾸려면 .env 에
-# TITLE_CLEANER_MODEL=... 만 추가하면 됨 (코드 변경 불필요).
-_MODEL = os.getenv("TITLE_CLEANER_MODEL", "openrouter/free")
+# 모델명은 로컬 서버에 로드한 모델 식별자와 같아야 한다. 서버가 다른 별칭을
+# 노출하면 LOCAL_LLM_MODEL 환경변수로 바꾼다.
+_MODEL = os.getenv(
+    "LOCAL_LLM_MODEL",
+    "Qwen3.6-35B-A3B-Uncensored-Claude-Genesis-Q8_0.gguf",
+)
 
 
 # ─── KIP(벤처뉴스) 전용 헬퍼 ───────────────────────────────
@@ -141,8 +143,8 @@ def _clean_kip_titles(articles: list[dict], chunk_size: int = 8) -> list[dict]:
     """KIP(벤처뉴스) 제목 정제 — 하이브리드 (결정적 시각 제거 + LLM 경계 추출).
 
     - 입력 순서/길이를 그대로 보존 (run_news_crawl 의 위치 매핑과 호환).
-    - 청크 단위로 호출해 약한 무료 모델의 품질 저하를 줄임.
-    - API 가 실패해도 최소한 후행 시각은 제거된 제목을 남김(기존보다 항상 나음).
+    - 청크 단위로 호출해 모델의 품질 저하를 줄임.
+    - 로컬 LLM 호출이 실패해도 최소한 후행 시각은 제거된 제목을 남김.
     """
     for start in range(0, len(articles), chunk_size):
         chunk = articles[start:start + chunk_size]

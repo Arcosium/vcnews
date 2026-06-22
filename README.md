@@ -8,7 +8,7 @@ KVCA(한국벤처캐피탈협회), KVIC(한국벤처투자), 그리고 네이트
 
 - **백엔드**: FastAPI + SQLite (WAL) + APScheduler
 - **인증**: JWT (HttpOnly 쿠키) + PBKDF2-HMAC-SHA256 (600k iterations)
-- **AI**: OpenRouter API 로 뉴스 제목 자동 정제 (번호/카테고리/기관 prefix 제거)
+- **AI**: 로컬 OpenAI 호환 LLM으로 뉴스 제목 자동 정제 (번호/카테고리/기관 prefix 제거)
 - **프론트**: Vanilla JS SPA (웹) + 네이티브 Android 앱 (Kotlin)
 
 ---
@@ -44,7 +44,7 @@ KVCA(한국벤처캐피탈협회), KVIC(한국벤처투자), 그리고 네이트
 ### 백그라운드 스케줄러
 - 기본 60분 주기 크롤링 (관리자가 변경 가능)
 - 매일 03:30 KST — 30일 지난 미스크랩 글 자동 삭제
-- 새 글 제목은 OpenRouter 무료 모델로 자동 정제 (예: `[공지] 003. 2025 VC 정기총회 안내` → `2025 VC 정기총회 안내`)
+- 새 글 제목은 로컬 LLM으로 자동 정제 (예: `[공지] 003. 2025 VC 정기총회 안내` → `2025 VC 정기총회 안내`)
 
 ## 빠른 시작
 
@@ -52,16 +52,29 @@ KVCA(한국벤처캐피탈협회), KVIC(한국벤처투자), 그리고 네이트
 
 ```bash
 pip install fastapi uvicorn sqlalchemy beautifulsoup4 requests apscheduler \
-            python-jose[cryptography] openai python-dotenv
+            python-jose[cryptography] openai
 ```
 
-### 2. 환경변수 (`.env`)
+### 2. 로컬 LLM 설정
 
 ```bash
-OPENROUTER_API_KEY=sk-or-...                # 제목 정제용 (필수)
-VCNEWS_JWT_SECRET=<선택, 미설정시 .jwt_secret 자동 생성>
-VCNEWS_DB_PATH=./vcnews.db                  # 선택
-VCNEWS_DISABLE_SCHEDULER=                   # 1로 설정시 백그라운드 잡 비활성 (테스트용)
+# llama.cpp / vLLM / Ollama 등의 OpenAI 호환 URL. 기본값: http://127.0.0.1:8000/v1
+export LOCAL_LLM_BASE_URL=http://127.0.0.1:8000/v1
+
+# 서버가 노출하는 모델명. 기본값은 Qwen3.6-35B-A3B-Uncensored-Claude-Genesis-Q8_0.gguf
+export LOCAL_LLM_MODEL=Qwen3.6-35B-A3B-Uncensored-Claude-Genesis-Q8_0.gguf
+```
+
+어떤 Gemini, OpenRouter, DeepSeek 등의 API 키도 필요하지 않습니다. 로컬 서버가
+다른 포트나 모델 별칭을 사용하면 위 두 환경변수만 맞추면 됩니다. 영구 설정 예시는
+[`local-llm.env.example`](local-llm.env.example)를 참고하세요.
+
+앱 자체 설정은 필요할 때만 추가합니다.
+
+```bash
+export VCNEWS_JWT_SECRET=<선택, 미설정시 .jwt_secret 자동 생성>
+export VCNEWS_DB_PATH=./vcnews.db            # 선택
+export VCNEWS_DISABLE_SCHEDULER=1            # 테스트 시 스케줄러 비활성화
 ```
 
 ### 3. 실행
@@ -108,7 +121,7 @@ VC_Crawling/
 ├── auth.py                # JWT 발급/검증 + PBKDF2 + Depends(get_current_user)
 ├── models.py              # SQLAlchemy ORM + DB 마이그레이션
 ├── news_crawler.py        # KVCA / KVIC / Nate 스크레이퍼
-├── title_cleaner.py       # OpenRouter 제목 정제
+├── title_cleaner.py       # 로컬 LLM 제목 정제
 ├── start_server.sh        # 8585 포트 정리 + uvicorn 기동
 ├── supervise.sh           # /api/health 워치독
 ├── vcnews.conf            # Nginx 프록시 설정
@@ -153,7 +166,7 @@ VC_Crawling/
 Multi-user web + Android platform that aggregates Korean VC news from KVCA, KVIC,
 and Nate News into a single feed with per-user notification keywords and a saved
 articles library. FastAPI + SQLite backend with JWT auth (HttpOnly cookies),
-APScheduler for background crawling, and OpenRouter API for automatic title
+APScheduler for background crawling, and a local OpenAI-compatible LLM for automatic title
 cleanup. UI is Korean-only.
 
 **Stack:** FastAPI · SQLAlchemy · BeautifulSoup · APScheduler · Vanilla JS · Kotlin (Android)
