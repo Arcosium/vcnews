@@ -12,6 +12,14 @@ import logging
 import re
 from typing import Optional
 
+# 통합 .env 에서 LOCAL_LLM_* 등을 프로세스 환경에 주입한다(서비스가 EnvironmentFile을
+# 지정하지 않아도 동작하도록). 미설치/실패 시 조용히 무시하고 기존 환경을 사용한다.
+try:
+    from dotenv import load_dotenv
+    load_dotenv("/home/arcosium/projects/.env")
+except Exception:
+    pass
+
 from openai import OpenAI
 logger = logging.getLogger("vcnews.title_cleaner")
 
@@ -22,7 +30,7 @@ logger = logging.getLogger("vcnews.title_cleaner")
 # 읽거나 전송하지 않는다. OpenAI SDK는 api_key 인자를 요구하므로 로컬 서버에
 # 전달해도 비밀값이 아닌 고정 더미 문자열만 사용한다.
 
-_LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+_LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
 _LOCAL_LLM_API_KEY = "local"
 
 _client: Optional[OpenAI] = None
@@ -33,7 +41,7 @@ def _get_client() -> OpenAI:
     if _client is None:
         _client = OpenAI(
             base_url=_LOCAL_LLM_BASE_URL,
-            api_key=_LOCAL_LLM_API_KEY,
+            api_key=«REDACTED»
         )
     return _client
 
@@ -42,7 +50,7 @@ def _get_client() -> OpenAI:
 # 노출하면 LOCAL_LLM_MODEL 환경변수로 바꾼다.
 _MODEL = os.getenv(
     "LOCAL_LLM_MODEL",
-    "Qwen3.6-35B-A3B-Uncensored-Claude-Genesis-Q8_0.gguf",
+    "qwen3.6-35b-a3b-uncensored",
 )
 
 
@@ -165,7 +173,10 @@ def _clean_kip_titles(articles: list[dict], chunk_size: int = 8) -> list[dict]:
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.0,
-                max_tokens=2000,
+                # 로컬 LLM이 추론(reasoning) 모델이라 추론이 max_tokens 예산을 먼저
+                # 소진한다. 작으면 content가 빈 문자열로 끝나므로(finish_reason=length)
+                # 넉넉히 준다 — 정제 출력 자체는 짧으나 추론 여유가 필요하다.
+                max_tokens=24000,
             )
             content = response.choices[0].message.content or ""
             mapping = _parse_indexed(content.strip())
@@ -249,7 +260,10 @@ def clean_titles_batch(articles: list[dict], source_type: str) -> list[dict]:
                 {"role": "user", "content": user_content},
             ],
             temperature=0.0,
-            max_tokens=4000,
+            # 로컬 LLM이 추론(reasoning) 모델이라 추론이 max_tokens 예산을 먼저
+            # 소진한다. 작으면 content가 빈 문자열로 끝나므로(finish_reason=length)
+            # 넉넉히 준다 — 정제 출력 자체는 짧으나 추론 여유가 필요하다.
+            max_tokens=24000,
         )
 
         content = response.choices[0].message.content
