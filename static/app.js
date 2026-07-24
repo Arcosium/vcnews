@@ -211,9 +211,7 @@
         state.authMode = mode;
         $$('.auth-tab').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
         dom.authSubmitLabel.textContent = mode === 'signup' ? '회원가입' : '로그인';
-        const submitIcon = dom.authSubmit.querySelector('.material-icons-round');
-        if (submitIcon) submitIcon.textContent = mode === 'signup' ? 'person_add' : 'login';
-        dom.authPassword.autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
+        dom.authPassword.autocomplete = mode === 'signup' ? 'new-password' : '«REDACTED»';
         clearAuthError();
     }
 
@@ -230,7 +228,7 @@
         e.preventDefault();
         clearAuthError();
         const username = dom.authUsername.value.trim();
-        const password = dom.authPassword.value;
+        const password = «REDACTED»
         const remember = !!dom.authRemember.checked;
         if (!username || !password) {
             showAuthError('아이디와 비밀번호를 입력하세요');
@@ -298,10 +296,6 @@
         return e;
     }
 
-    function icon(name) {
-        return el('span', { class: 'material-icons-round', text: name });
-    }
-
     function createArticleCard(article) {
         // 벤처뉴스(kip) 는 배지 없이 — 같은 탭 안에 있어 식별 불필요.
         // KVCA/KVIC 는 벤처공고 탭에서 두 소스 구분 위해 배지 유지.
@@ -311,7 +305,7 @@
         const scrapBtn = el('button',
             { class: `btn-scrap${article.is_scrapped ? ' active' : ''}`, title: '스크랩',
               attrs: { 'data-article-id': String(article.id) } },
-            icon(article.is_scrapped ? 'star' : 'star_border'),
+            article.is_scrapped ? '★' : '☆',
         );
 
         scrapBtn.addEventListener('click', async (e) => {
@@ -320,7 +314,7 @@
                 const result = await API.toggleScrap(article.id);
                 article.is_scrapped = result.scrapped;
                 scrapBtn.classList.toggle('active', result.scrapped);
-                scrapBtn.replaceChildren(icon(result.scrapped ? 'star' : 'star_border'));
+                scrapBtn.replaceChildren(result.scrapped ? '★' : '☆');
                 showToast(result.message, 'success');
                 if (state.currentTab === 'scraps' && !result.scrapped) {
                     card.style.transition = 'all 0.3s ease';
@@ -348,8 +342,7 @@
         const link = el('a',
             { class: 'btn-link',
               attrs: { href: article.link, target: '_blank', rel: 'noopener noreferrer' } },
-            icon('open_in_new'),
-            ' 링크 이동',
+            '링크 이동 ↗',
         );
 
         const body = el('div', { class: 'article-body' }, meta, titleEl, link);
@@ -487,10 +480,7 @@
     function renderKeywords(source, listEl, keywords) {
         listEl.replaceChildren();
         keywords.forEach((kw) => {
-            const removeBtn = el('button', { class: 'btn-remove', title: '삭제' });
-            const removeIcon = icon('close');
-            removeIcon.style.fontSize = '14px';
-            removeBtn.appendChild(removeIcon);
+            const removeBtn = el('button', { class: 'btn-remove', title: '삭제', text: '×' });
 
             const chip = el('div', { class: 'keyword-chip' },
                 el('span', { text: kw }),
