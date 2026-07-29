@@ -41,7 +41,7 @@ def _get_client() -> OpenAI:
     if _client is None:
         _client = OpenAI(
             base_url=_LOCAL_LLM_BASE_URL,
-            api_key=«REDACTED»
+            api_key=_LOCAL_LLM_API_KEY,
         )
     return _client
 
@@ -52,6 +52,35 @@ _MODEL = os.getenv(
     "LOCAL_LLM_MODEL",
     "qwen3.6-35b-a3b-uncensored",
 )
+
+
+# ─── VC(KVCA/KVIC 공고) 전용 규칙 정제 — LLM 불필요 ───────────────────────
+#
+# raw 제목은 `_parse_table_rows` 가 만든 `" | ".join(테이블 셀)` 이라 **구조화**돼 있다:
+#   '493 | 중소기업중앙회 | 2026년도 … 국내 블라인드 펀드 선정 공고 | 2026-07-10 | 2026-07-31'
+# LLM 이 하던 일(일련번호·[태그]·날짜·기관명 셀 제거, 제목 셀 추출)은 전부 규칙으로 된다.
+# 실측(KVCA/KVIC 라이브 20건) 100% 일치 확인 — LLM 경합 아까워 규칙으로 대체(사장 지시 2026-07-10).
+_VC_SERIAL = re.compile(r"^\d{1,7}$")                       # 게시판 일련번호 셀
+_VC_DATE = re.compile(r"^\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}$")  # 날짜 셀
+_VC_BRACKET_ONLY = re.compile(r"^[\[\(（].*[\]\)）]$")        # [출자계획]·[서류결과] 처럼 태그만인 셀
+_VC_STATUS = re.compile(r"^(마감|접수중|진행중|예정|D-?\d+|조회\s*\d+|첨부|新|N|HOT|공지)$")
+_VC_LEAD_BRACKET = re.compile(r"^\s*[\[\(（][^\]\)）]{1,20}[\]\)）]\s*")  # 셀 안 선행 [기관명]
+
+
+def clean_vc_title(raw: str) -> str:
+    """` | ` 로 이어진 공고 게시판 셀에서 실제 공고 제목만 추출 — 규칙만(LLM 없음)."""
+    cells = [c.strip() for c in str(raw).split("|")]
+    keep = [c for c in cells if c and not (
+        _VC_SERIAL.match(c) or _VC_DATE.match(c)
+        or _VC_BRACKET_ONLY.match(c) or _VC_STATUS.match(c))]
+    if not keep:
+        return str(raw).strip()
+    title = max(keep, key=len)          # 제목 문장이 기관명·상태 셀보다 길다
+    prev = None                          # 셀 안 선행 [기관명] 제거 (여러 겹일 수 있어 반복)
+    while prev != title:
+        prev = title
+        title = _VC_LEAD_BRACKET.sub("", title).strip()
+    return title or str(raw).strip()
 
 
 # ─── KIP(벤처뉴스) 전용 헬퍼 ───────────────────────────────
@@ -173,10 +202,13 @@ def _clean_kip_titles(articles: list[dict], chunk_size: int = 8) -> list[dict]:
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.0,
-                # 로컬 LLM이 추론(reasoning) 모델이라 추론이 max_tokens 예산을 먼저
-                # 소진한다. 작으면 content가 빈 문자열로 끝나므로(finish_reason=length)
-                # 넉넉히 준다 — 정제 출력 자체는 짧으나 추론 여유가 필요하다.
-                max_tokens=24000,
+                # 제목 경계 추출은 추론이 전혀 필요 없다. llama-server(--jinja)의
+                # chat_template_kwargs.enable_thinking=False 로 추론을 **템플릿 레벨에서 강제 차단**한다
+                # (프롬프트 /no_think 는 이 모델에서 불신 — ArQuant 2026-07-09 실측: 이 방식만 추론 0토큰).
+                # 추론이 꺼지면 출력이 정제 제목뿐이라 24000→512 로 줄여도 충분하고, 호출이 수분→수초로 준다
+                # (공유 llamaserver 슬롯 점유 시간 최소화 — 사장 지시 2026-07-10).
+                max_tokens=512,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             content = response.choices[0].message.content or ""
             mapping = _parse_indexed(content.strip())
@@ -222,76 +254,14 @@ def clean_titles_batch(articles: list[dict], source_type: str) -> list[dict]:
     if not articles:
         return articles
 
-    # KIP(벤처뉴스)는 전용 하이브리드 파이프라인 사용 — VC 경로는 그대로 유지
+    # KIP(벤처뉴스)는 헤드라인↔본문 경계가 의미적이라 LLM 이 실제로 필요 → 하이브리드 파이프라인 유지.
     if source_type == "kip":
         return _clean_kip_titles(articles)
     if source_type != "vc":
         return articles
 
-    # 원본 제목 추출
-    raw_titles = [a["title"] for a in articles]
-
-    system_prompt = (
-            "You are a Korean news title cleaner. "
-            "The user will provide a list of raw crawled VC (벤처캐피탈) notice titles, one per line. "
-            "Extract ONLY the core announcement title — remove all serial numbers, dates, "
-            "bracketed category tags like [출자계획] or [접수현황], and any organization prefix. "
-            "Keep the substantive announcement title clean and readable in Korean. "
-            "Do NOT remove the name of the fund (e.g., 모태펀드(보건복지부)). "
-            "You MUST output exactly the same number of lines as the input. "
-            "Format your output as a numbered list (1., 2., 3., etc.).\n\n"
-            "Example 1:\n"
-            "Input: 1059 | [출자계획] | 모태펀드(보건복지부) 2026년 5월 수시 출자사업 계획 공고 | 2026-05-11\n"
-            "Output: 1. 모태펀드(보건복지부) 2026년 5월 수시 출자사업 계획 공고\n\n"
-            "Example 2:\n"
-            "Input: 470 | 서초구청 | [서초구청] 2026 서초AICT스타트업 2호 펀드 출자공고 | 2026-05-11 | 2026-06-10\n"
-            "Output: 2. 2026 서초AICT스타트업 2호 펀드 출자공고"
-        )
-
-    # 한 줄에 하나씩 결합 (내부 개행 제거)
-    user_content = "\n".join(t.replace("\n", " ").strip() for t in raw_titles)
-
-    try:
-        client = _get_client()
-        response = client.chat.completions.create(
-            model=_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.0,
-            # 로컬 LLM이 추론(reasoning) 모델이라 추론이 max_tokens 예산을 먼저
-            # 소진한다. 작으면 content가 빈 문자열로 끝나므로(finish_reason=length)
-            # 넉넉히 준다 — 정제 출력 자체는 짧으나 추론 여유가 필요하다.
-            max_tokens=24000,
-        )
-
-        content = response.choices[0].message.content
-        result_text = content.strip() if content else ""
-        
-        # 줄 단위로 분리
-        cleaned_lines = [line.strip() for line in result_text.split("\n") if line.strip()]
-        
-        # '1.', '-', '*' 등으로 시작하는 경우 제거
-        for i in range(len(cleaned_lines)):
-            cleaned_lines[i] = re.sub(r"^(\d+[\.\)]|[-*])\s*", "", cleaned_lines[i])
-
-        if len(cleaned_lines) >= len(articles):
-            for i, article in enumerate(articles):
-                cleaned = cleaned_lines[i]
-                if cleaned:
-                    article["title"] = cleaned
-            logger.info(f"제목 정제 완료 ({source_type}): {len(articles)}건")
-        else:
-            logger.warning(
-                f"AI 응답 길이 불일치 (부족함): 원본 {len(articles)}건, 응답 {len(cleaned_lines)}건.\n"
-                f"가능한 부분까지만 정제 적용."
-            )
-            for i, cleaned in enumerate(cleaned_lines):
-                if cleaned and i < len(articles):
-                    articles[i]["title"] = cleaned
-
-    except Exception as e:
-        logger.warning(f"제목 정제 API 오류: {e}. 원본 제목 유지.")
-
+    # VC(KVCA/KVIC 공고)는 `|` 로 구분된 구조화 셀이라 **규칙으로 완전 대체**(LLM 호출 안 함).
+    for a in articles:
+        a["title"] = clean_vc_title(a.get("title", ""))
+    logger.info(f"제목 정제 완료 (vc·규칙): {len(articles)}건")
     return articles

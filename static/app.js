@@ -211,7 +211,7 @@
         state.authMode = mode;
         $$('.auth-tab').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
         dom.authSubmitLabel.textContent = mode === 'signup' ? '회원가입' : '로그인';
-        dom.authPassword.autocomplete = mode === 'signup' ? 'new-password' : '«REDACTED»';
+        dom.authPassword.autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
         clearAuthError();
     }
 
@@ -228,7 +228,7 @@
         e.preventDefault();
         clearAuthError();
         const username = dom.authUsername.value.trim();
-        const password = «REDACTED»
+        const password = dom.authPassword.value;
         const remember = !!dom.authRemember.checked;
         if (!username || !password) {
             showAuthError('아이디와 비밀번호를 입력하세요');
