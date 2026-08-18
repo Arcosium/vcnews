@@ -422,6 +422,13 @@ a { color: inherit; }
     line-height: 1.6;
 }
 
+.app-download-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+}
+
 .setting-row {
     display: flex;
     align-items: center;

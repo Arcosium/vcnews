@@ -1,7 +1,7 @@
 """VC News — 인증 유틸.
 
 - 비밀번호: PBKDF2-HMAC-SHA256 (600k iter, 16-byte salt) — Python 내장만 사용.
-- 세션: JWT (HS256) in HttpOnly 쿠키. 만료 30일.
+- 세션: JWT (HS256) in HttpOnly 쿠키. 기본 만료 30일.
 - FastAPI dependency `current_user` 로 보호 엔드포인트에서 유저 로드.
 
 JWT 시크릿은 `VCNEWS_JWT_SECRET` 환경변수에 두는 게 정석이지만,
@@ -84,14 +84,19 @@ JWT_COOKIE_NAME = "vcnews_session"
 JWT_EXPIRE_DAYS = 30
 
 
-def issue_token(user_id: int, username: str) -> str:
+def issue_token(user_id: int, username: str, *, never_expires: bool = False) -> str:
     now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         "sub": str(user_id),
         "username": username,
         "iat": int(now.timestamp()),
-        "exp": int((now + datetime.timedelta(days=JWT_EXPIRE_DAYS)).timestamp()),
     }
+    if never_expires:
+        payload["persistent"] = True
+    else:
+        payload["exp"] = int(
+            (now + datetime.timedelta(days=JWT_EXPIRE_DAYS)).timestamp()
+        )
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -122,8 +127,12 @@ def get_current_user(
         user = session.get(User, user_id)
         if not user:
             raise HTTPException(status_code=401, detail="유저를 찾을 수 없습니다")
+        # 만료 시각이 없는 토큰은 DB에서 허용한 계정에만 유효하다. 나중에
+        # 플래그를 끄면 이미 발급된 무기한 토큰도 즉시 거부된다.
+        if "exp" not in payload and not user.session_never_expires:
+            raise HTTPException(status_code=401, detail="유효하지 않은 세션")
         # detached: 세션 닫히기 전에 필요한 필드 access 해두기
-        _ = (user.username, user.is_admin)
+        _ = (user.username, user.is_admin, user.session_never_expires)
         session.expunge(user)
         return user
     finally:
