@@ -39,7 +39,6 @@ class User(Base):
     username = Column(String(64), nullable=False, unique=True, index=True)
     password_hash = Column(String(255), nullable=False)
     is_admin = Column(Boolean, nullable=False, default=False)
-    session_never_expires = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=lambda: datetime.datetime.now(KST))
 
 
@@ -160,11 +159,6 @@ def _migrate_add_columns():
     with engine.begin() as conn:
         if not _column_exists("articles", "nate_query"):
             conn.execute(text("ALTER TABLE articles ADD COLUMN nate_query VARCHAR(50)"))
-        if not _column_exists("users", "session_never_expires"):
-            conn.execute(text(
-                "ALTER TABLE users ADD COLUMN session_never_expires "
-                "BOOLEAN NOT NULL DEFAULT 0"
-            ))
 
 
 def _migrate_legacy_per_user(admin_user_id: int):

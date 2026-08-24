@@ -216,14 +216,12 @@ class KeywordRequest(BaseModel):
 # 운영 도메인은 HTTPS이므로 Secure가 기본이다. 평문 로컬 개발에서만
 # VCNEWS_COOKIE_SECURE=0으로 명시해 Lax 쿠키를 쓴다.
 _COOKIE_SECURE = os.environ.get("VCNEWS_COOKIE_SECURE", "1") == "1"
-_NEVER_EXPIRES_COOKIE_MAX_AGE = 10 * 365 * 24 * 3600
 
 
 def _set_session_cookie(
     response: Response,
     token: str,
     remember: bool = False,
-    never_expires: bool = False,
 ):
     """세션 쿠키를 발급한다.
 
@@ -239,9 +237,7 @@ def _set_session_cookie(
         secure=_COOKIE_SECURE,
         path="/",
     )
-    if never_expires:
-        kwargs["max_age"] = _NEVER_EXPIRES_COOKIE_MAX_AGE
-    elif remember:
+    if remember:
         kwargs["max_age"] = JWT_EXPIRE_DAYS * 24 * 3600
     response.set_cookie(**kwargs)
     if _COOKIE_SECURE:
@@ -273,13 +269,8 @@ def signup(data: SignupRequest, response: Response, db: Session = Depends(get_db
     db.add(UserPreferences(user_id=user.id))
     db.commit()
 
-    token = issue_token(
-        user.id, user.username, never_expires=user.session_never_expires,
-    )
-    _set_session_cookie(
-        response, token, remember=data.remember,
-        never_expires=user.session_never_expires,
-    )
+    token = issue_token(user.id, user.username)
+    _set_session_cookie(response, token, remember=data.remember)
     return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
 
 
@@ -296,13 +287,8 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
         db.add(UserPreferences(user_id=user.id))
         db.commit()
 
-    token = issue_token(
-        user.id, user.username, never_expires=user.session_never_expires,
-    )
-    _set_session_cookie(
-        response, token, remember=data.remember,
-        never_expires=user.session_never_expires,
-    )
+    token = issue_token(user.id, user.username)
+    _set_session_cookie(response, token, remember=data.remember)
     return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
 
 
