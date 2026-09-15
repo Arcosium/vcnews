@@ -70,3 +70,6 @@ quant_dataset*.json
 .DS_Store
 Thumbs.db
 vcnews.db
+/vcnews.db-wal
+/vcnews.db-shm
+/.git
