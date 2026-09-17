@@ -1,7 +1,7 @@
 """VC News — 인증 유틸.
 
 - 비밀번호: PBKDF2-HMAC-SHA256 (600k iter, 16-byte salt) — Python 내장만 사용.
-- 세션: JWT (HS256) in HttpOnly 쿠키. 만료 30일.
+- 세션: JWT (HS256) in HttpOnly 쿠키. 기본 만료 30일.
 - FastAPI dependency `current_user` 로 보호 엔드포인트에서 유저 로드.
 
 JWT 시크릿은 `VCNEWS_JWT_SECRET` 환경변수에 두는 게 정석이지만,
@@ -90,8 +90,10 @@ def issue_token(user_id: int, username: str) -> str:
         "sub": str(user_id),
         "username": username,
         "iat": int(now.timestamp()),
-        "exp": int((now + datetime.timedelta(days=JWT_EXPIRE_DAYS)).timestamp()),
     }
+    payload["exp"] = int(
+        (now + datetime.timedelta(days=JWT_EXPIRE_DAYS)).timestamp()
+    )
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 

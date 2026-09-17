@@ -213,28 +213,39 @@ class KeywordRequest(BaseModel):
 
 # ─── 인증 엔드포인트 ───────────────────────────────────────
 
-# 운영(HTTPS)에선 VCNEWS_COOKIE_SECURE=1 로 켜는 게 정석. 기본값은
-# 기존 동작(평문 허용) 그대로 — 무중단을 위해 배포 환경에서 opt-in.
-_COOKIE_SECURE = os.environ.get("VCNEWS_COOKIE_SECURE", "0") == "1"
+# 운영 도메인은 HTTPS이므로 Secure가 기본이다. 평문 로컬 개발에서만
+# VCNEWS_COOKIE_SECURE=0으로 명시해 Lax 쿠키를 쓴다.
+_COOKIE_SECURE = os.environ.get("VCNEWS_COOKIE_SECURE", "1") == "1"
 
 
-def _set_session_cookie(response: Response, token: str, remember: bool = False):
-    """remember=True 면 30일 영속 쿠키, False 면 세션 쿠키(브라우저/앱 종료 시 소멸).
+def _set_session_cookie(
+    response: Response,
+    token: str,
+    remember: bool = False,
+):
+    """세션 쿠키를 발급한다.
 
     세션 쿠키: max_age/expires 둘 다 안 보내면 브라우저가 세션 종료 시 폐기.
     영속 쿠키: max_age 로 만료 명시 → 디바이스 재부팅 후에도 유지.
+    운영 쿠키: iframe에서도 쓸 수 있게 SameSite=None; Secure; Partitioned.
     """
     kwargs = dict(
         key=JWT_COOKIE_NAME,
         value=token,
         httponly=True,
-        samesite="lax",
+        samesite="none" if _COOKIE_SECURE else "lax",
         secure=_COOKIE_SECURE,
         path="/",
     )
     if remember:
         kwargs["max_age"] = JWT_EXPIRE_DAYS * 24 * 3600
     response.set_cookie(**kwargs)
+    if _COOKIE_SECURE:
+        # Python 3.12의 stdlib는 Partitioned 속성을 아직 직렬화하지 못한다.
+        # Starlette가 만든 Set-Cookie 값 끝에 표준 속성만 덧붙인다.
+        response.headers["set-cookie"] = (
+            response.headers["set-cookie"] + "; Partitioned"
+        )
 
 
 @app.post("/api/auth/signup")
@@ -283,7 +294,17 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
 
 @app.post("/api/auth/logout")
 def logout(response: Response):
-    response.delete_cookie(JWT_COOKIE_NAME, path="/")
+    response.delete_cookie(
+        JWT_COOKIE_NAME,
+        path="/",
+        secure=_COOKIE_SECURE,
+        httponly=True,
+        samesite="none" if _COOKIE_SECURE else "lax",
+    )
+    if _COOKIE_SECURE:
+        response.headers["set-cookie"] = (
+            response.headers["set-cookie"] + "; Partitioned"
+        )
     return {"message": "로그아웃 완료"}
 
 

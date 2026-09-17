@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import datetime
 import logging
 import re
@@ -256,6 +257,17 @@ def _crawl_nate_all() -> list[dict]:
     return merged
 
 
+def _mirror_to_archive(items: list[dict]) -> int:
+    """arcnews(공용 뉴스 아카이브)에 미러링. arcastack.pth 가 없으면 조용히 건너뛴다."""
+    if not items:
+        return 0
+    try:
+        import arcnews
+    except ImportError:
+        return 0
+    return arcnews.mirror(items, app="vcnews")
+
+
 def run_news_crawl(test_mode: bool = False) -> str:
     """크롤링 1회 실행. 결과 문자열 반환. DB에 신규 기사 저장."""
     init_db()
@@ -270,6 +282,7 @@ def run_news_crawl(test_mode: bool = False) -> str:
 
     session = SessionLocal()
     total_new = 0
+    added: list[dict] = []          # 공용 뉴스 아카이브(arcnews) 미러링용
 
     try:
         existing_links = set(
@@ -312,6 +325,8 @@ def run_news_crawl(test_mode: bool = False) -> str:
                     nate_query=None,
                 )
                 session.add(article)
+                added.append({"title": art["title"], "url": art["link"], "source": key,
+                              "source_label": label, "published_at": art["date"]})
                 existing_links.add(art["link"])
                 site_added += 1
 
@@ -326,17 +341,24 @@ def run_news_crawl(test_mode: bool = False) -> str:
         nate_articles = _crawl_nate_all()
         log(f"  · 통합 파싱: {len(nate_articles)}건 (중복 제거 후)")
 
-        if nate_articles:
+        # ⚠ 정제(LLM)는 **신규 기사에만** 한다. 예전엔 매시간 크롤이 네이트 결과 전체를 LLM 으로
+        # 정제한 뒤 이미 본 링크를 버려, 같은 기사를 반복 정제하며 공유 LLM 슬롯을 낭비했다
+        # (사장 지시 2026-07-10: VC News LLM 사용 최소화). vc 경로는 규칙이라 값싸지만 kip 은 비싸다.
+        fresh = [a for a in nate_articles if a["link"] not in existing_links]
+        skipped = len(nate_articles) - len(fresh)
+        if skipped:
+            log(f"  · 이미 저장된 {skipped}건은 정제 생략(LLM 절약)")
+        if fresh:
             # title cleaner 는 title 만 다루므로 nate_query 보존 위해
             # 원본을 그대로 두고 cleaned 만 매핑.
             cleaned = clean_titles_batch(
-                [{"title": a["title"]} for a in nate_articles], "kip"
+                [{"title": a["title"]} for a in fresh], "kip"
             )
             for i, cl in enumerate(cleaned):
-                nate_articles[i]["title"] = cl["title"]
+                fresh[i]["title"] = cl["title"]
 
         site_added = 0
-        for art in nate_articles:
+        for art in fresh:
             if art["link"] in existing_links:
                 continue
 
@@ -349,6 +371,10 @@ def run_news_crawl(test_mode: bool = False) -> str:
                 nate_query=art.get("nate_query"),
             )
             session.add(article)
+            added.append({"title": art["title"], "url": art["link"], "source": "kip",
+                          "source_label": "벤처뉴스", "published_at": art["date"],
+                          "extra": json.dumps({"nate_query": art.get("nate_query")},
+                                              ensure_ascii=False)})
             existing_links.add(art["link"])
             site_added += 1
 
@@ -360,6 +386,11 @@ def run_news_crawl(test_mode: bool = False) -> str:
 
         session.commit()
         log(f"\n총 신규 항목: {total_new}건 저장 완료")
+        # 정본은 vcnews.db 다. arcnews 는 프로젝트 공용 아카이브(ArQuant 뉴스와 한 곳에 모임)로,
+        # 여기 쓰기가 실패해도 크롤은 이미 커밋됐다 — mirror 는 예외를 삼킨다.
+        n = _mirror_to_archive(added)
+        if n:
+            log(f"공용 뉴스 아카이브에 {n}건 추가")
 
     except Exception as e:
         session.rollback()
